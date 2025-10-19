@@ -134,7 +134,7 @@ async def verify_token_endpoint(request: TokenRequest):
             "userId": stored_user["uid"],
             "email": stored_user["email"]
         }
-        
+#HI
     except HTTPException as e:
         raise e
     except Exception as e:
