@@ -9,17 +9,17 @@ db = firestore.client()
 
 
 # ============================================
-# REQUEST OPERATIONS
+# REQUEST OPERATIONS (Updated for Phase 3)
 # ============================================
 
 async def create_request(user_uid: str, user_email: str, request_data: dict) -> dict:
     """
-    Create a new request in Firestore
+    Create a new request in Firestore with area support
     
     Args:
         user_uid: UID of the user creating the request
         user_email: Email of the user creating the request
-        request_data: Request details
+        request_data: Request details including pickup_area and drop_area
         
     Returns:
         dict: Created request with request_id
@@ -32,13 +32,18 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         "poster_email": user_email,
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
+        "pickup_area": request_data.get("pickup_area"),  # NEW
         "drop_location": request_data["drop_location"],
+        "drop_area": request_data.get("drop_area"),  # NEW
         "time_requested": request_data["time_requested"],
         "reward": request_data["reward"],
         "status": "open",
         "accepted_by": None,
         "acceptor_email": None,
         "created_at": datetime.utcnow(),
+        "accepted_at": None,
+        "completed_at": None,
+        "updated_at": datetime.utcnow(),
         "notes": request_data.get("notes")
     }
     
@@ -48,31 +53,45 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
     return request_document
 
 
-async def get_all_requests(status: Optional[str] = None) -> List[dict]:
+async def get_all_requests(
+    status: Optional[str] = None,
+    pickup_area: Optional[str] = None,
+    drop_area: Optional[str] = None
+) -> List[dict]:
     """
-    Get all requests, optionally filtered by status
+    Get all requests with optional filters
     
     Args:
-        status: Optional status filter (open, accepted, completed)
+        status: Optional status filter
+        pickup_area: Optional pickup area filter
+        drop_area: Optional drop area filter
         
     Returns:
         List[dict]: List of requests
     """
     requests_ref = db.collection('requests')
     
+    # Start with status filter if provided
     if status:
-        # Use the new filter syntax
         query = requests_ref.where(filter=firestore.FieldFilter('status', '==', status))
     else:
         query = requests_ref
     
-    # Order by creation time (newest first)
-    query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
-    
+    # Get all matching documents
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
+        
+        # Apply area filters in memory
+        if pickup_area and request_data.get('pickup_area') != pickup_area:
+            continue
+        if drop_area and request_data.get('drop_area') != drop_area:
+            continue
+        
         requests.append(request_data)
+    
+    # Sort by creation time (newest first)
+    requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
     
     return requests
 
@@ -184,14 +203,16 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
             'status': 'accepted',
             'accepted_by': user_uid,
             'acceptor_email': user_email,
-            'accepted_at': datetime.utcnow()
+            'accepted_at': datetime.utcnow(),
+            'updated_at': datetime.utcnow()
         })
         
         # Return updated data
         request_data.update({
             'status': 'accepted',
             'accepted_by': user_uid,
-            'acceptor_email': user_email
+            'acceptor_email': user_email,
+            'accepted_at': datetime.utcnow()
         })
         return request_data
     
@@ -270,30 +291,8 @@ async def update_request_status(
 
 
 # ============================================
-# USER OPERATIONS
+# USER OPERATIONS (Enhanced for Phase 3)
 # ============================================
-
-async def update_user_reachability(user_uid: str, reachable: bool) -> dict:
-    """
-    Update user's reachability status
-    
-    Args:
-        user_uid: User UID
-        reachable: Whether user is available for deliveries
-        
-    Returns:
-        dict: Updated user data
-    """
-    user_ref = db.collection('users').document(user_uid)
-    
-    user_ref.update({
-        'reachable': reachable,
-        'updated_at': datetime.utcnow()
-    })
-    
-    user_doc = user_ref.get()
-    return user_doc.to_dict()
-
 
 async def get_user_profile(user_uid: str) -> Optional[dict]:
     """

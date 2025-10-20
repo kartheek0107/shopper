@@ -13,17 +13,49 @@ class Settings:
     # College domain verification
     ALLOWED_EMAIL_DOMAIN = os.getenv(
         "ALLOWED_EMAIL_DOMAIN", 
-        "@iiitsonepat.ac.in"  # Change this to your college domain
+        "@iiitsonepat.ac.in"
     )
     
     # API configuration
-    API_TITLE = "College App Backend"
-    API_VERSION = "1.0.0"
+    API_TITLE = "College Delivery System API"
+    API_VERSION = "3.0.0"
+    API_DESCRIPTION = """
+    College Delivery System API - Phase 3
+    
+    Features:
+    - User Authentication with Firebase
+    - Request Management with Area Support
+    - Connectivity & Reachability Tracking
+    - Area-based Filtering
+    - Push Notifications (FCM)
+    - Real-time User Availability
+    """
     
     # CORS settings (adjust for your frontend)
     CORS_ORIGINS = [
         "http://localhost:3000",  # React default
         "http://localhost:5173",  # Vite default
+        "http://localhost:8080",  # Vue default
     ]
+    
+    # Predefined campus areas
+    CAMPUS_AREAS = [
+        "A",
+        "B",
+        "C",
+        "D",
+        "Library",
+        "Canteen",
+        "Sports Complex",
+        "Academic Block",
+        "Main Gate"
+    ]
+    
+    # Connectivity settings
+    CONNECTIVITY_CHECK_INTERVAL_MINUTES = 5
+    STALE_CONNECTIVITY_THRESHOLD_MINUTES = 10
+    
+    # Notification settings
+    SEND_NEW_REQUEST_NOTIFICATIONS = True  # Enable/disable new request notifications
 
 settings = Settings()
