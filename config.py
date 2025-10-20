@@ -51,6 +51,13 @@ class Settings:
         "Main Gate"
     ]
     
+    MIN_DEADLINE_HOURS = 1  # Minimum: 1 hour from now
+    MAX_DEADLINE_HOURS = 72  # Maximum: 3 days
+    DEFAULT_DEADLINE_HOURS = 24  # Default: 24 hours
+    
+    # Background job settings
+    CLEANUP_INTERVAL_MINUTES = 0.17  # Every 10 seconds
+
     # Connectivity settings
     CONNECTIVITY_CHECK_INTERVAL_MINUTES = 5
     STALE_CONNECTIVITY_THRESHOLD_MINUTES = 10

@@ -4,6 +4,9 @@ from pydantic import EmailStr
 from typing import Optional, List
 from config import settings
 from auth import get_current_user, verify_email_domain
+from scheduler import cleanup_expired_requests_job
+from database import mark_expired_requests
+import asyncio
 from models import (
     CreateRequestModel, RequestResponse, AcceptRequestModel,
     UpdateRequestStatusModel, UserProfileResponse, UpdateProfileModel,
@@ -48,6 +51,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks"""
+    asyncio.create_task(cleanup_expired_requests_job())
+    print("✅ Started background cleanup job")
 
 
 # ============================================
@@ -301,12 +310,31 @@ async def create_request_endpoint(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.post("/request/cleanup-expired")
+async def cleanup_expired_requests(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Manually trigger cleanup of expired requests
+    (In production, this should run as a scheduled job)
+    """
+    try:
+        expired_count = await mark_expired_requests()
+        return {
+            "success": True,
+            "message": f"Marked {expired_count} requests as expired"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.get("/request/all", response_model=List[RequestResponse])
 async def get_all_requests_endpoint(
     status: Optional[RequestStatus] = Query(None, description="Filter by status"),
     pickup_area: Optional[str] = Query(None, description="Filter by pickup area"),
     drop_area: Optional[str] = Query(None, description="Filter by drop area"),
+    priority_only: bool = Query(False, description="Show only priority requests"),  # NEW
+    include_expired: bool = Query(False, description="Include expired requests"),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -322,8 +350,13 @@ async def get_all_requests_endpoint(
         requests = await get_all_requests(
             status=status_value,
             pickup_area=pickup_area,
-            drop_area=drop_area
+            drop_area=drop_area,
+            include_expired=include_expired,
         )
+
+        if priority_only:
+            requests = [r for r in requests if r.get('priority', False)]
+
         return requests
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

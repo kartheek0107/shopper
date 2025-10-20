@@ -26,15 +26,30 @@ class CreateRequestModel(BaseModel):
     reward: float = Field(..., gt=0, description="Reward amount (must be positive)")
     time_requested: datetime = Field(..., description="When the delivery is needed")
     notes: Optional[str] = Field(None, max_length=1000, description="Additional notes")
+    deadline: datetime = Field(..., description="Deadline for request completion")
+    priority: bool = Field(default=False, description="Whether the request is high priority")
     
     @field_validator('time_requested')
     @classmethod
     def time_must_be_future(cls, v):
         now = datetime.now(timezone.utc)
+        return now
+    @field_validator('deadline')
+    @classmethod
+    def deadline_must_be_future_and_reasonable(cls, v, info):
+        now = datetime.now(timezone.utc)
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
+        
+        # Must be in future
         if v <= now:
-            raise ValueError('time_requested must be in the future')
+            raise ValueError('deadline must be in the future')
+        
+        # Optional: Check deadline is after time_requested
+        time_requested = info.data.get('time_requested')
+        if time_requested and v < time_requested:
+            raise ValueError('deadline must be after time_requested')
+        
         return v
 
 
@@ -55,6 +70,9 @@ class RequestResponse(BaseModel):
     acceptor_email: Optional[str] = None
     created_at: datetime
     notes: Optional[str] = None
+    deadline: datetime
+    priority: bool 
+    is_expired: bool = False
 
 
 class AcceptRequestModel(BaseModel):

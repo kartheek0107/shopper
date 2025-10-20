@@ -44,7 +44,10 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         "accepted_at": None,
         "completed_at": None,
         "updated_at": datetime.utcnow(),
-        "notes": request_data.get("notes")
+        "notes": request_data.get("notes"),
+        "deadline": request_data.get("deadline"),  # NEW
+        "priority": request_data.get("priority", False),  # NEW
+        "is_expired": False,
     }
     
     # Store in Firestore
@@ -52,7 +55,35 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
     
     return request_document
 
-
+async def mark_expired_requests() -> int:
+    """
+    Marks requests as expired if deadline passed and not completed."""
+     # Get all open/accepted requests
+    query = requests_ref.where(
+        filter=firestore.FieldFilter('status', 'in', ['open', 'accepted'])
+    ).where(
+        filter=firestore.FieldFilter('is_expired', '==', False)
+    )
+    
+    now = datetime.utcnow()
+    expired_count = 0
+    
+    for doc in query.stream():
+        request_data = doc.to_dict()
+        deadline = request_data.get('deadline')
+        
+        if deadline and deadline < now:
+            # Mark as expired and cancelled
+            doc.reference.update({
+                'is_expired': True,
+                'status': 'cancelled',
+                'updated_at': now,
+                'cancelled_reason': 'Deadline expired'
+            })
+            expired_count += 1
+    
+    return expired_count
+    
 async def get_all_requests(
     status: Optional[str] = None,
     pickup_area: Optional[str] = None,
@@ -86,6 +117,8 @@ async def get_all_requests(
         if pickup_area and request_data.get('pickup_area') != pickup_area:
             continue
         if drop_area and request_data.get('drop_area') != drop_area:
+            continue
+        if not include_expired and request_data.get('is_expired', False):
             continue
         
         requests.append(request_data)
