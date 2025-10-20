@@ -54,7 +54,7 @@ app.add_middleware(
 # PUBLIC ENDPOINTS
 # ============================================
 
-@app.get("/", methods=["GET", "HEAD"])
+@app.get("/")
 async def root():
     """Health check endpoint"""
     return {
