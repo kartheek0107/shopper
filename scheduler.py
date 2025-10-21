@@ -2,11 +2,14 @@
 import asyncio
 from datetime import datetime
 from database import mark_expired_requests
+from config import settings
 
 async def cleanup_expired_requests_job():
     """
     Run periodically to mark expired requests
     """
+    interval_seconds = settings.CLEANUP_INTERVAL_MINUTES * 60
+    
     while True:
         try:
             expired_count = await mark_expired_requests()
@@ -15,7 +18,7 @@ async def cleanup_expired_requests_job():
         except Exception as e:
             print(f"❌ Error in cleanup job: {e}")
         
-        # Run every 10 minutes
-        await asyncio.sleep(600)
+        
+        await asyncio.sleep(interval_seconds)
 
 # Start in background when app starts

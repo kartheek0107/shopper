@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import EmailStr
 from typing import Optional, List
+from contextlib import asynccontextmanager
 from config import settings
 from auth import get_current_user, verify_email_domain
 from scheduler import cleanup_expired_requests_job
@@ -36,11 +37,27 @@ from notifications import (
     send_new_request_in_area_notification
 )
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Start background tasks
+    cleanup_task = asyncio.create_task(cleanup_expired_requests_job())
+    print("✅ Started background cleanup job")
+    
+    yield  # Application is running
+    
+    # Shutdown: Cancel background tasks
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        print("🛑 Background cleanup job stopped")
+
 # Initialize FastAPI app
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
-    description=settings.API_DESCRIPTION
+    description=settings.API_DESCRIPTION,
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -52,11 +69,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-async def startup_event():
-    """Start background tasks"""
-    asyncio.create_task(cleanup_expired_requests_job())
-    print("✅ Started background cleanup job")
+
 
 
 # ============================================

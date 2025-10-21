@@ -120,7 +120,7 @@ async def send_notification(
 async def send_request_accepted_notification(
     poster_uid: str,
     acceptor_email: str,
-    item: str,
+    item: List[str],
     request_id: str
 ) -> bool:
     """
@@ -136,7 +136,8 @@ async def send_request_accepted_notification(
         bool: True if sent successfully
     """
     title = "Request Accepted! 🎉"
-    body = f"{acceptor_email} accepted your request for '{item}'"
+    items_text = ", ".join(item)  # Join items
+    body = f"{acceptor_email} accepted your request for '{items_text}'"
     
     data = {
         'type': 'request_accepted',
@@ -150,7 +151,7 @@ async def send_request_accepted_notification(
 async def send_delivery_completed_notification(
     poster_uid: str,
     deliverer_email: str,
-    item: str,
+    item: List[str],
     request_id: str
 ) -> bool:
     """
@@ -166,7 +167,8 @@ async def send_delivery_completed_notification(
         bool: True if sent successfully
     """
     title = "Delivery Completed! ✅"
-    body = f"{deliverer_email} completed delivery of '{item}'"
+    items_text = ", ".join(item)  # Join items
+    body = f"{deliverer_email} completed delivery of '{items_text}'"
     
     data = {
         'type': 'delivery_completed',
@@ -179,7 +181,7 @@ async def send_delivery_completed_notification(
 
 async def send_new_request_in_area_notification(
     area: str,
-    item: str,
+    item: List[str],
     request_id: str,
     exclude_uid: str
 ) -> int:
@@ -200,7 +202,8 @@ async def send_new_request_in_area_notification(
     query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
     
     title = f"New Request in {area}! 📦"
-    body = f"Someone needs '{item}' delivered"
+    items_text = ", ".join(item)  # Join items
+    body = f"Someone needs '{items_text}' delivered"
     
     data = {
         'type': 'new_request',
@@ -234,7 +237,7 @@ async def send_new_request_in_area_notification(
 async def send_request_cancelled_notification(
     acceptor_uid: str,
     poster_email: str,
-    item: str,
+    item: List[str],
     request_id: str
 ) -> bool:
     """
@@ -250,7 +253,8 @@ async def send_request_cancelled_notification(
         bool: True if sent successfully
     """
     title = "Request Cancelled ❌"
-    body = f"{poster_email} cancelled the request for '{item}'"
+    items_text = ", ".join(item)  # Join items
+    body = f"{poster_email} cancelled the request for '{items_text}'"
     
     data = {
         'type': 'request_cancelled',

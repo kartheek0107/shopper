@@ -1,5 +1,5 @@
 from firebase_admin import firestore
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict
 from fastapi import HTTPException
 import uuid
@@ -32,21 +32,21 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         "poster_email": user_email,
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
-        "pickup_area": request_data.get("pickup_area"),  # NEW
+        "pickup_area": request_data.get("pickup_area"),
         "drop_location": request_data["drop_location"],
-        "drop_area": request_data.get("drop_area"),  # NEW
+        "drop_area": request_data.get("drop_area"),
         "time_requested": request_data["time_requested"],
         "reward": request_data["reward"],
         "status": "open",
         "accepted_by": None,
         "acceptor_email": None,
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
         "accepted_at": None,
         "completed_at": None,
-        "updated_at": datetime.utcnow(),
+        "updated_at": datetime.now(timezone.utc),
         "notes": request_data.get("notes"),
-        "deadline": request_data.get("deadline"),  # NEW
-        "priority": request_data.get("priority", False),  # NEW
+        "deadline": request_data.get("deadline"),
+        "priority": request_data.get("priority", False),
         "is_expired": False,
     }
     
@@ -57,37 +57,49 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
 
 async def mark_expired_requests() -> int:
     """
-    Marks requests as expired if deadline passed and not completed."""
-     # Get all open/accepted requests
+    Marks requests as expired if deadline passed and not completed.
+    
+    Returns:
+        int: Number of requests marked as expired
+    """
+    requests_ref = db.collection('requests')  
+    
+    # Get all open/accepted requests
     query = requests_ref.where(
         filter=firestore.FieldFilter('status', 'in', ['open', 'accepted'])
     ).where(
         filter=firestore.FieldFilter('is_expired', '==', False)
     )
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expired_count = 0
     
     for doc in query.stream():
         request_data = doc.to_dict()
         deadline = request_data.get('deadline')
         
-        if deadline and deadline < now:
-            # Mark as expired and cancelled
-            doc.reference.update({
-                'is_expired': True,
-                'status': 'cancelled',
-                'updated_at': now,
-                'cancelled_reason': 'Deadline expired'
-            })
-            expired_count += 1
+        if deadline:
+            # Ensure deadline is timezone-aware
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            
+            if deadline < now:
+                # Mark as expired and cancelled
+                doc.reference.update({
+                    'is_expired': True,
+                    'status': 'cancelled',
+                    'updated_at': now,
+                    'cancelled_reason': 'Deadline expired'
+                })
+                expired_count += 1
     
     return expired_count
     
 async def get_all_requests(
     status: Optional[str] = None,
     pickup_area: Optional[str] = None,
-    drop_area: Optional[str] = None
+    drop_area: Optional[str] = None,
+    include_expired: bool = False
 ) -> List[dict]:
     """
     Get all requests with optional filters
@@ -232,12 +244,13 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
             )
         
         # Update request
+        now = datetime.now(timezone.utc)
         transaction.update(request_ref, {
             'status': 'accepted',
             'accepted_by': user_uid,
             'acceptor_email': user_email,
-            'accepted_at': datetime.utcnow(),
-            'updated_at': datetime.utcnow()
+            'accepted_at': now,
+            'updated_at': now
         })
         
         # Return updated data
@@ -245,7 +258,7 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
             'status': 'accepted',
             'accepted_by': user_uid,
             'acceptor_email': user_email,
-            'accepted_at': datetime.utcnow()
+            'accepted_at': now
         })
         return request_data
     
@@ -309,13 +322,14 @@ async def update_request_status(
         )
     
     # Update status
+    now = datetime.now(timezone.utc)
     update_data = {
         'status': new_status,
-        'updated_at': datetime.utcnow()
+        'updated_at': now
     }
     
     if new_status == 'completed':
-        update_data['completed_at'] = datetime.utcnow()
+        update_data['completed_at'] = now
     
     request_ref.update(update_data)
     request_data.update(update_data)
@@ -359,7 +373,7 @@ async def update_user_profile(user_uid: str, profile_data: dict) -> dict:
     
     update_data = {
         **profile_data,
-        'updated_at': datetime.utcnow()
+        'updated_at': datetime.now(timezone.utc)
     }
     
     user_ref.update(update_data)

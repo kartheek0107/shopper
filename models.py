@@ -18,23 +18,38 @@ class RequestStatus(str, Enum):
 
 class CreateRequestModel(BaseModel):
     """Model for creating a new request with area support"""
-    item: str = Field(..., min_length=1, max_length=200)
+    item: List[str] = Field(..., min_length=1, max_length=200)
     pickup_location: str = Field(..., min_length=1, max_length=500)
-    pickup_area: str = Field(..., description="Pickup area (A, B, C, Library, etc.)")
+    pickup_area: str = Field(..., description="Pickup area")
     drop_location: str = Field(..., min_length=1, max_length=500)
-    drop_area: str = Field(..., description="Drop area (A, B, C, Library, etc.)")
+    drop_area: str = Field(..., description="Drop area")
     reward: float = Field(..., gt=0, description="Reward amount (must be positive)")
     time_requested: datetime = Field(..., description="When the delivery is needed")
     notes: Optional[str] = Field(None, max_length=1000, description="Additional notes")
     deadline: datetime = Field(..., description="Deadline for request completion")
     priority: bool = Field(default=False, description="Whether the request is high priority")
+
+    @field_validator('item')
+    @classmethod
+    def validate_items(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one item must be specified')
+        for item in v:
+            if not item or len(item.strip()) == 0:
+                raise ValueError('Items cannot be empty')
+            if len(item) > 200:
+                raise ValueError('Each item must be less than 200 characters')
+        return v
     
     @field_validator('time_requested')
     @classmethod
     def time_must_be_future(cls, v):
         now = datetime.now(timezone.utc)
-        return now
-    @field_validator('deadline')
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        if v <= now:
+            raise ValueError('time_requested must be in the future')
+        return v 
     @classmethod
     def deadline_must_be_future_and_reasonable(cls, v, info):
         now = datetime.now(timezone.utc)
@@ -58,7 +73,7 @@ class RequestResponse(BaseModel):
     request_id: str
     posted_by: str
     poster_email: str
-    item: str
+    item: List[str]
     pickup_location: str
     pickup_area: Optional[str] = None
     drop_location: str
