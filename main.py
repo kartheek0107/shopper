@@ -14,7 +14,10 @@ from models import (
     SuccessResponse, RequestStatsResponse, RequestStatus,
     UpdateConnectivityModel, SetPreferredAreasModel, SetCurrentAreaModel,
     RegisterFCMTokenModel, ReachabilityStatusResponse, AreaCountResponse,
-    ConnectivityStatsResponse, EnhancedDashboardResponse
+    ConnectivityStatsResponse, EnhancedDashboardResponse,
+    CreateRatingModel, UpdateRatingModel, RatingResponse, 
+    UserRatingsResponse, CanRateResponse, RatingStatsResponse,
+    RatingsGivenResponse
 )
 from database import (
     create_request, get_all_requests, get_user_requests, get_accepted_requests,
@@ -35,6 +38,11 @@ from notifications import (
     send_request_accepted_notification,
     send_delivery_completed_notification,
     send_new_request_in_area_notification
+)
+from ratings import (
+    create_rating, get_user_ratings, get_rating_for_request,
+    can_rate_request, get_user_rating_summary, delete_rating,
+    update_rating, get_ratings_given_by_user
 )
 
 @asynccontextmanager
@@ -89,7 +97,8 @@ async def root():
             "Connectivity & Reachability Tracking",
             "Area-based Filtering",
             "Push Notifications (FCM)",
-            "Real-time User Availability"
+            "Real-time User Availability",
+            "Deliverer Rating System"
         ]
     }
 
@@ -346,7 +355,7 @@ async def get_all_requests_endpoint(
     status: Optional[RequestStatus] = Query(None, description="Filter by status"),
     pickup_area: Optional[str] = Query(None, description="Filter by pickup area"),
     drop_area: Optional[str] = Query(None, description="Filter by drop area"),
-    priority_only: bool = Query(False, description="Show only priority requests"),  # NEW
+    priority_only: bool = Query(False, description="Show only priority requests"),
     include_expired: bool = Query(False, description="Include expired requests"),
     current_user: dict = Depends(get_current_user)
 ):
@@ -602,6 +611,229 @@ async def get_user_stats_endpoint(
 
 
 # ============================================
+# RATING ENDPOINTS
+# ============================================
+
+@app.post("/rating/create", response_model=RatingResponse)
+async def create_rating_endpoint(
+    rating_data: CreateRatingModel,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Create a rating for a completed delivery
+    
+    Requirements:
+    - User must be the request poster
+    - Request must be completed
+    - Poster hasn't already rated this delivery
+    - Rating must be 1-5 stars
+    
+    Only the poster can rate the deliverer (acceptor).
+    """
+    try:
+        rating = await create_rating(
+            request_id=rating_data.request_id,
+            rater_uid=current_user["uid"],
+            rating=rating_data.rating,
+            comment=rating_data.comment
+        )
+        
+        return rating
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/rating/{rating_id}", response_model=RatingResponse)
+async def update_rating_endpoint(
+    rating_id: str,
+    update_data: UpdateRatingModel,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update an existing rating (within 24 hours)
+    
+    Only the poster who created the rating can update it.
+    """
+    try:
+        updated_rating = await update_rating(
+            rating_id=rating_id,
+            user_uid=current_user["uid"],
+            new_rating=update_data.rating,
+            new_comment=update_data.comment
+        )
+        
+        return updated_rating
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/rating/deliverer/{user_uid}", response_model=UserRatingsResponse)
+async def get_deliverer_ratings_endpoint(
+    user_uid: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get all ratings received by a user as a deliverer
+    
+    Returns rating statistics and individual ratings with comments.
+    Useful for viewing a deliverer's reputation.
+    """
+    try:
+        ratings = await get_user_ratings(user_uid)
+        return ratings
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/rating/my-deliverer-ratings", response_model=UserRatingsResponse)
+async def get_my_deliverer_ratings_endpoint(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get all ratings you've received as a deliverer
+    
+    Shows your delivery performance ratings.
+    """
+    try:
+        ratings = await get_user_ratings(current_user["uid"])
+        return ratings
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/rating/my-given-ratings", response_model=RatingsGivenResponse)
+async def get_my_given_ratings_endpoint(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get all ratings you've given as a poster
+    
+    Shows all the deliverers you've rated.
+    """
+    try:
+        ratings = await get_ratings_given_by_user(current_user["uid"])
+        return {
+            "ratings": ratings,
+            "total": len(ratings)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/rating/request/{request_id}")
+async def get_request_rating_endpoint(
+    request_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get rating for a specific request
+    
+    Returns the rating if it exists, useful for checking if you've already rated.
+    """
+    try:
+        rating = await get_rating_for_request(request_id)
+        
+        if not rating:
+            return {
+                "exists": False,
+                "message": "No rating found for this request"
+            }
+        
+        return {
+            "exists": True,
+            "rating": rating
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/rating/can-rate/{request_id}", response_model=CanRateResponse)
+async def can_rate_request_endpoint(
+    request_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Check if current user can rate the deliverer for a request
+    
+    Returns:
+    - Whether rating is possible
+    - Who would be rated (deliverer info)
+    - Reason if cannot rate
+    - Existing rating if already rated
+    """
+    try:
+        can_rate = await can_rate_request(request_id, current_user["uid"])
+        return can_rate
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/rating/summary/{user_uid}", response_model=RatingStatsResponse)
+async def get_deliverer_rating_summary_endpoint(
+    user_uid: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get summarized rating information for a deliverer
+    
+    Useful for displaying in:
+    - User profiles
+    - Available deliverers list
+    - Request acceptor cards
+    """
+    try:
+        summary = await get_user_rating_summary(user_uid)
+        return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/rating/my-summary", response_model=RatingStatsResponse)
+async def get_my_rating_summary_endpoint(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get your own rating summary as a deliverer
+    
+    Shows your delivery reputation score.
+    """
+    try:
+        summary = await get_user_rating_summary(current_user["uid"])
+        return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/rating/{rating_id}", response_model=SuccessResponse)
+async def delete_rating_endpoint(
+    rating_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Delete a rating (within 24 hours of creation)
+    
+    Only the poster who created the rating can delete it.
+    """
+    try:
+        result = await delete_rating(rating_id, current_user["uid"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================
 # ENHANCED DASHBOARD (Phase 3)
 # ============================================
 
@@ -610,11 +842,12 @@ async def enhanced_dashboard_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Enhanced dashboard with area-based stats
+    Enhanced dashboard with area-based stats and rating info
     
     Returns:
     - User profile with reachability
     - Request statistics
+    - Deliverer rating summary
     - Reachable users by area
     - Active requests
     - Nearby requests
@@ -625,6 +858,16 @@ async def enhanced_dashboard_endpoint(
         
         # Get user stats
         stats = await get_user_stats(current_user["uid"])
+        
+        # Get deliverer rating summary
+        try:
+            deliverer_rating = await get_user_rating_summary(current_user["uid"])
+        except:
+            deliverer_rating = {
+                "average_rating": 0.0,
+                "total_ratings": 0,
+                "rating_badge": "No Ratings Yet"
+            }
         
         # Get reachable users by area
         reachable_by_area = await get_reachable_users_by_area()
@@ -640,6 +883,7 @@ async def enhanced_dashboard_endpoint(
         return {
             "user": user_profile,
             "stats": stats,
+            "deliverer_rating": deliverer_rating,
             "reachable_users_by_area": reachable_by_area,
             "active_requests": active_requests,
             "nearby_requests": nearby_requests

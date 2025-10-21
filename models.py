@@ -218,3 +218,74 @@ class EnhancedDashboardResponse(BaseModel):
     reachable_users_by_area: dict
     active_requests: List[RequestResponse]
     nearby_requests: List[RequestResponse]
+
+
+
+# ============================================
+# RATING MODELS
+# ============================================
+
+class CreateRatingModel(BaseModel):
+    """Model for creating a rating (poster rates deliverer)"""
+    request_id: str = Field(..., description="ID of the completed request")
+    rating: int = Field(..., ge=1, le=5, description="Rating value (1-5 stars)")
+    comment: Optional[str] = Field(None, max_length=500, description="Optional feedback comment")
+
+
+class UpdateRatingModel(BaseModel):
+    """Model for updating a rating"""
+    rating: int = Field(..., ge=1, le=5, description="New rating value (1-5 stars)")
+    comment: Optional[str] = Field(None, max_length=500, description="Updated comment")
+
+
+class RatingResponse(BaseModel):
+    """Model for rating response"""
+    rating_id: str
+    request_id: str
+    poster_uid: str
+    deliverer_uid: str
+    rating: int
+    comment: Optional[str]
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class RatingDetailResponse(BaseModel):
+    """Model for detailed rating with names"""
+    rating_id: str
+    request_id: str
+    rating: int
+    comment: Optional[str]
+    poster_name: str
+    item_delivered: str
+    created_at: datetime
+
+
+class RatingStatsResponse(BaseModel):
+    """Model for user rating statistics"""
+    average_rating: float
+    total_ratings: int
+    rating_distribution: dict[int, int]
+    percentage_distribution: Optional[dict[int, float]] = None
+    rating_badge: Optional[str] = None
+
+
+class UserRatingsResponse(BaseModel):
+    """Model for user's received ratings (as deliverer)"""
+    stats: RatingStatsResponse
+    ratings: List[dict]
+
+
+class CanRateResponse(BaseModel):
+    """Model for checking if user can rate"""
+    can_rate: bool
+    reason: str
+    deliverer_uid: Optional[str] = None
+    deliverer_name: Optional[str] = None
+    existing_rating: Optional[dict] = None
+
+
+class RatingsGivenResponse(BaseModel):
+    """Model for ratings given by user (as poster)"""
+    ratings: List[dict]
+    total: int
