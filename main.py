@@ -1,13 +1,30 @@
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import EmailStr
+from pydantic import BaseModel, Field
 from typing import Optional, List
+from firebase_admin import firestore
+import math
 from contextlib import asynccontextmanager
 from config import settings
 from auth import get_current_user, verify_email_domain
 from scheduler import cleanup_expired_requests_job
 from database import mark_expired_requests
 import asyncio
+
+db = firestore.client()
+
+from location_service import (
+    update_user_location,
+    get_nearby_users,
+    is_user_in_area,
+    detect_area_from_coordinates,
+    calculate_delivery_distance,
+    get_users_in_area,
+    get_area_info,
+    get_all_areas_info
+)
+
 from models import (
     CreateRequestModel, RequestResponse, AcceptRequestModel,
     UpdateRequestStatusModel, UserProfileResponse, UpdateProfileModel,
@@ -238,7 +255,505 @@ async def set_current_area_endpoint(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+class UpdateGPSLocationModel(BaseModel):
+    """Model for updating GPS location"""
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    accuracy: Optional[float] = Field(None, description="GPS accuracy in meters")
+    fast_mode: bool = Field(False, description="Enable fast mode (no edge detection)")
 
+
+class BulkLocationUpdate(BaseModel):
+    """Model for bulk location updates (admin/testing)"""
+    updates: List[dict] = Field(..., description="List of {user_uid, latitude, longitude}")
+
+
+class NearbyUsersQuery(BaseModel):
+    """Query for finding nearby users"""
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    radius_meters: float = Field(5000.0, gt=0, le=50000, description="Search radius in meters")
+
+
+class DetectAreaModel(BaseModel):
+    """Model for detecting area from coordinates"""
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+
+
+# ============================================
+# GPS LOCATION ENDPOINTS
+# ============================================
+
+@app.post("/location/update-gps")
+async def update_gps_location_endpoint(
+    location: UpdateGPSLocationModel,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update user's GPS location and auto-detect area(s)
+    
+    Handles edge cases:
+    - Users on area boundaries get flagged (normal mode)
+    - Users in overlapping areas get all matching areas (normal mode)
+    - 50m buffer zone for edge detection
+    - Users outside all areas get assigned to nearest (within 10km)
+    
+    Fast mode (fast_mode=true):
+    - 10x faster, only returns primary area
+    - No edge detection, no nearby areas
+    - Use for frequent background updates
+    
+    Normal mode (fast_mode=false):
+    - Complete area info with edge detection
+    - Use for user-initiated location updates
+    
+    The app should call this endpoint:
+    - When user opens app: fast_mode=false (full info)
+    - Background updates (every 5-10 min): fast_mode=true (fast)
+    - User manually refreshes: fast_mode=false (full info)
+    """
+    try:
+        result = await update_user_location(
+            user_uid=current_user["uid"],
+            latitude=location.latitude,
+            longitude=location.longitude,
+            accuracy=location.accuracy,
+            fast_mode=location.fast_mode
+        )
+        
+        return {
+            'success': True,
+            'message': 'GPS location updated',
+            'fast_mode': location.fast_mode,
+            'data': result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/location/my-gps")
+async def get_my_gps_location_endpoint(
+    current_user: dict = Depends(get_current_user)
+):
+    """Get current user's stored GPS location with area info"""
+    user_ref = db.collection('users').document(current_user["uid"])
+    user_doc = user_ref.get()
+    
+    if not user_doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user_data = user_doc.to_dict()
+    gps_location = user_data.get('gps_location')
+    
+    if not gps_location:
+        return {
+            'has_location': False,
+            'message': 'No GPS location stored'
+        }
+    
+    return {
+        'has_location': True,
+        'gps_location': gps_location,
+        'primary_area': user_data.get('current_area'),
+        'all_matching_areas': user_data.get('all_areas', []),
+        'is_on_edge': user_data.get('is_on_area_edge', False),
+        'nearby_areas': user_data.get('nearby_areas', [])
+    }
+
+
+@app.post("/location/detect-area")
+async def detect_area_endpoint(
+    coords: DetectAreaModel,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Detect which area(s) specific coordinates belong to
+    
+    Useful for:
+    - Testing area detection before saving
+    - Validating pickup/drop locations
+    - Showing area info on map
+    """
+    try:
+        area_info = detect_area_from_coordinates(
+            coords.latitude,
+            coords.longitude,
+            include_nearby=True
+        )
+        
+        return {
+            'success': True,
+            'coordinates': {
+                'latitude': coords.latitude,
+                'longitude': coords.longitude
+            },
+            'area_info': area_info
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/location/nearby-users")
+async def get_nearby_users_endpoint(
+    query: NearbyUsersQuery,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Find nearby reachable users within specified radius
+    
+    Useful for:
+    - Finding deliverers near your location
+    - Showing delivery options with actual distances
+    """
+    try:
+        nearby = await get_nearby_users(
+            latitude=query.latitude,
+            longitude=query.longitude,
+            radius_m=query.radius_meters
+        )
+        
+        return {
+            'total': len(nearby),
+            'radius_meters': query.radius_meters,
+            'radius_km': round(query.radius_meters / 1000, 2),
+            'users': nearby
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/location/users-in-area/{area_name}")
+async def get_users_in_area_endpoint(
+    area_name: str,
+    include_edge_users: bool = Query(True, description="Include users on area boundary"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get all reachable users in a specific area
+    
+    Args:
+        area_name: Area name (SBIT, Pallri, etc.)
+        include_edge_users: Whether to include users on the edge (default: true)
+    """
+    try:
+        users = await get_users_in_area(area_name, include_edge_users)
+        
+        return {
+            'area': area_name,
+            'total': len(users),
+            'include_edge_users': include_edge_users,
+            'users': users
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/location/nearby-requests-gps")
+async def get_nearby_requests_by_gps_endpoint(
+    radius_meters: float = Query(5000.0, description="Search radius in meters"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get requests near user's current GPS location
+    
+    More accurate than area-based filtering.
+    Requires user to have GPS location stored.
+    """
+    # Get user's GPS location
+    user_ref = db.collection('users').document(current_user["uid"])
+    user_doc = user_ref.get()
+    
+    if not user_doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user_data = user_doc.to_dict()
+    gps_location = user_data.get('gps_location')
+    
+    if not gps_location:
+        raise HTTPException(
+            status_code=400,
+            detail="GPS location not available. Please update your location first."
+        )
+    
+    user_lat = gps_location['latitude']
+    user_lon = gps_location['longitude']
+    
+    # Get all open requests
+    requests_ref = db.collection('requests')
+    query = requests_ref.where(filter=firestore.FieldFilter('status', '==', 'open'))
+    
+    nearby_requests = []
+    
+    from location_service import calculate_distance_meters
+    
+    for doc in query.stream():
+        request_data = doc.to_dict()
+        
+        # Skip own requests
+        if request_data.get('posted_by') == current_user["uid"]:
+            continue
+        
+        # Check if request has GPS coordinates for pickup
+        pickup_gps = request_data.get('pickup_gps')
+        if not pickup_gps:
+            continue
+        
+        # Calculate distance from user to pickup location
+        distance = calculate_distance_meters(
+            user_lat, user_lon,
+            pickup_gps['latitude'], pickup_gps['longitude']
+        )
+        
+        if distance <= radius_meters:
+            request_data['distance_meters'] = round(distance, 2)
+            request_data['distance_km'] = round(distance / 1000, 2)
+            nearby_requests.append(request_data)
+    
+    # Sort by distance
+    nearby_requests.sort(key=lambda x: x.get('distance_meters', 999999))
+    
+    return {
+        'total': len(nearby_requests),
+        'radius_meters': radius_meters,
+        'radius_km': round(radius_meters / 1000, 2),
+        'user_location': {
+            'latitude': user_lat,
+            'longitude': user_lon
+        },
+        'requests': nearby_requests
+    }
+
+
+@app.get("/location/check-area/{area_name}")
+async def check_if_in_area_endpoint(
+    area_name: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Check if user's current GPS location is within a specific area
+    
+    Useful for:
+    - Verifying user is actually at pickup location
+    - Confirming delivery area before accepting
+    """
+    try:
+        result = await is_user_in_area(current_user["uid"], area_name)
+        
+        message = f"You are {'in' if result['is_in_area'] else 'not in'} {area_name}"
+        if result['is_in_area'] and result.get('is_on_edge'):
+            message += " (near boundary)"
+        
+        return {
+            **result,
+            'message': message
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/location/area-info/{area_name}")
+async def get_area_info_endpoint(
+    area_name: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get information about a specific area (center coordinates, radius)
+    
+    Useful for:
+    - Displaying area boundaries on map
+    - Showing area coverage
+    """
+    info = get_area_info(area_name)
+    
+    if not info:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Area '{area_name}' not found"
+        )
+    
+    return info
+
+
+@app.get("/location/all-areas")
+async def get_all_areas_endpoint(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get information about all defined areas
+    
+    Useful for:
+    - Displaying all areas on map
+    - Showing coverage zones
+    """
+    areas = get_all_areas_info()
+    
+    return {
+        'total': len(areas),
+        'areas': areas
+    }
+
+
+@app.post("/location/bulk-update")
+async def bulk_location_update_endpoint(
+    updates: BulkLocationUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Bulk update locations (for testing/admin)
+    Uses fast mode for efficiency
+    
+    Example:
+    {
+      "updates": [
+        {"user_uid": "user1", "latitude": 28.989, "longitude": 77.150},
+        {"user_uid": "user2", "latitude": 28.970, "longitude": 77.153}
+      ]
+    }
+    """
+    from location_service import detect_area_from_coordinates_fast
+    
+    results = []
+    errors = []
+    
+    for update in updates.updates:
+        try:
+            user_uid = update.get('user_uid')
+            lat = update.get('latitude')
+            lon = update.get('longitude')
+            
+            if not user_uid or lat is None or lon is None:
+                errors.append(f"Invalid update: {update}")
+                continue
+            
+            # Use ultra-fast detection
+            area = detect_area_from_coordinates_fast(lat, lon)
+            
+            # Update user
+            user_ref = db.collection('users').document(user_uid)
+            user_ref.update({
+                'gps_location': {
+                    'latitude': lat,
+                    'longitude': lon,
+                    'last_updated': datetime.utcnow()
+                },
+                'current_area': area,
+                'updated_at': datetime.utcnow()
+            })
+            
+            results.append({
+                'user_uid': user_uid,
+                'area': area,
+                'success': True
+            })
+            
+        except Exception as e:
+            errors.append(f"Error for {update}: {str(e)}")
+    
+    return {
+        'total_updates': len(updates.updates),
+        'successful': len(results),
+        'failed': len(errors),
+        'results': results,
+        'errors': errors
+    }
+
+
+@app.get("/location/performance-test")
+async def location_performance_test(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Test performance of different detection methods
+    
+    Useful for comparing fast vs normal mode
+    """
+    import time
+    from location_service import detect_area_from_coordinates, detect_area_from_coordinates_fast
+    
+    # Test coordinates (SBIT area)
+    test_coords = [
+        (28.9890834, 77.1506293),  # SBIT center
+        (28.9894, 77.1509),  # SBIT edge
+        (28.9709633, 77.1531023),  # Pallri center
+        (28.9845887, 77.0373188),  # Sonepat center
+        (28.920, 77.100)  # Random outside
+    ]
+    
+    # Test fast mode
+    start_fast = time.time()
+    fast_results = []
+    for lat, lon in test_coords * 100:  # 500 iterations
+        area = detect_area_from_coordinates_fast(lat, lon)
+        fast_results.append(area)
+    fast_time = time.time() - start_fast
+    
+    # Test normal mode
+    start_normal = time.time()
+    normal_results = []
+    for lat, lon in test_coords * 100:  # 500 iterations
+        info = detect_area_from_coordinates(lat, lon, include_nearby=False)
+        normal_results.append(info['primary_area'])
+    normal_time = time.time() - start_normal
+    
+    return {
+        'test_iterations': len(test_coords) * 100,
+        'fast_mode': {
+            'time_seconds': round(fast_time, 3),
+            'avg_per_lookup_ms': round((fast_time / (len(test_coords) * 100)) * 1000, 2)
+        },
+        'normal_mode': {
+            'time_seconds': round(normal_time, 3),
+            'avg_per_lookup_ms': round((normal_time / (len(test_coords) * 100)) * 1000, 2)
+        },
+        'speedup': f"{round(normal_time / fast_time, 1)}x faster",
+        'recommendation': 'Use fast_mode=true for frequent background updates, fast_mode=false for user-initiated updates'
+    }
+
+
+@app.post("/location/calculate-delivery-distance")
+async def calculate_delivery_distance_endpoint(
+    pickup: DetectAreaModel,
+    drop: DetectAreaModel,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Calculate distance and area info for a delivery route
+    
+    Useful for:
+    - Estimating delivery distance before creating request
+    - Showing route information
+    """
+    try:
+        distance_info = await calculate_delivery_distance(
+            pickup_location={
+                'latitude': pickup.latitude,
+                'longitude': pickup.longitude
+            },
+            drop_location={
+                'latitude': drop.latitude,
+                'longitude': drop.longitude
+            }
+        )
+        
+        return {
+            'success': True,
+            'pickup': {
+                'latitude': pickup.latitude,
+                'longitude': pickup.longitude,
+                'area': distance_info['pickup_area']
+            },
+            'drop': {
+                'latitude': drop.latitude,
+                'longitude': drop.longitude,
+                'area': distance_info['drop_area']
+            },
+            'distance_meters': distance_info['distance_meters'],
+            'distance_km': distance_info['distance_km'],
+            'crosses_areas': distance_info['crosses_areas']
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 # ============================================
 # REACHABLE USERS COUNT (Phase 3)
 # ============================================

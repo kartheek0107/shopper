@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator ,EmailStr
 from typing import Optional, List
 from datetime import datetime, timezone
 from enum import Enum
@@ -289,3 +289,160 @@ class RatingsGivenResponse(BaseModel):
     """Model for ratings given by user (as poster)"""
     ratings: List[dict]
     total: int
+
+# ============================================
+# LOCATION MODELS
+# ============================================  
+class GPSCoordinates(BaseModel):
+    """GPS coordinates model"""
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    accuracy: Optional[float] = Field(None, description="Accuracy in meters")
+
+
+class CreateRequestModelWithGPS(BaseModel):
+    """Enhanced request model with GPS coordinates"""
+    item: List[str] = Field(..., min_length=1, max_length=200)
+    
+    # Text locations (still needed for display)
+    pickup_location: str = Field(..., min_length=1, max_length=500)
+    drop_location: str = Field(..., min_length=1, max_length=500)
+    
+    # GPS coordinates (optional but recommended)
+    pickup_gps: Optional[GPSCoordinates] = Field(
+        None, 
+        description="GPS coordinates of pickup location"
+    )
+    drop_gps: Optional[GPSCoordinates] = Field(
+        None, 
+        description="GPS coordinates of drop location"
+    )
+    
+    # Areas (auto-detected from GPS or manually selected)
+    pickup_area: Optional[str] = Field(None, description="Pickup area")
+    drop_area: Optional[str] = Field(None, description="Drop area")
+    
+    reward: float = Field(..., gt=0)
+    time_requested: datetime
+    notes: Optional[str] = Field(None, max_length=1000)
+    deadline: datetime
+    priority: bool = Field(default=False)
+
+
+class RequestResponseWithGPS(BaseModel):
+    """Enhanced request response with GPS and distance"""
+    request_id: str
+    posted_by: str
+    poster_email: str
+    item: List[str]
+    
+    # Text locations
+    pickup_location: str
+    drop_location: str
+    
+    # GPS coordinates
+    pickup_gps: Optional[dict] = None
+    drop_gps: Optional[dict] = None
+    
+    # Areas
+    pickup_area: Optional[str] = None
+    drop_area: Optional[str] = None
+    
+    # Calculated distance (if GPS available)
+    delivery_distance_km: Optional[float] = None
+    
+    time_requested: datetime
+    reward: float
+    status: str
+    accepted_by: Optional[str] = None
+    acceptor_email: Optional[str] = None
+    created_at: datetime
+    notes: Optional[str] = None
+    deadline: datetime
+    priority: bool
+    is_expired: bool = False
+    
+    # Distance from current user (if querying nearby)
+    distance_from_user_km: Optional[float] = None
+
+
+# Update your create_request function in database.py
+# Add these imports at the top of database.py if not already there
+from firebase_admin import firestore
+import uuid
+from datetime import datetime, timezone
+
+db = firestore.client()
+
+async def create_request_with_gps(user_uid: str, user_email: str, request_data: dict) -> dict:
+    """
+    Create request with GPS support
+    Auto-detect areas if GPS provided but areas not specified
+    """
+    import uuid
+    from datetime import datetime, timezone
+    
+    request_id = str(uuid.uuid4())
+    
+    # Auto-detect areas from GPS if not provided
+    pickup_area = request_data.get("pickup_area")
+    drop_area = request_data.get("drop_area")
+    
+    if not pickup_area and request_data.get("pickup_gps"):
+        from location_service import detect_area_from_coordinates
+        pickup_gps = request_data["pickup_gps"]
+        pickup_area = detect_area_from_coordinates(
+            pickup_gps["latitude"], 
+            pickup_gps["longitude"]
+        )
+    
+    if not drop_area and request_data.get("drop_gps"):
+        from location_service import detect_area_from_coordinates
+        drop_gps = request_data["drop_gps"]
+        drop_area = detect_area_from_coordinates(
+            drop_gps["latitude"], 
+            drop_gps["longitude"]
+        )
+    
+    # Calculate delivery distance if both GPS coordinates provided
+    delivery_distance = None
+    if request_data.get("pickup_gps") and request_data.get("drop_gps"):
+        from location_service import calculate_distance
+        pickup_gps = request_data["pickup_gps"]
+        drop_gps = request_data["drop_gps"]
+        delivery_distance = calculate_distance(
+            pickup_gps["latitude"], pickup_gps["longitude"],
+            drop_gps["latitude"], drop_gps["longitude"]
+        )
+    
+    request_document = {
+        "request_id": request_id,
+        "posted_by": user_uid,
+        "poster_email": user_email,
+        "item": request_data["item"],
+        "pickup_location": request_data["pickup_location"],
+        "pickup_area": pickup_area,
+        "pickup_gps": request_data.get("pickup_gps"),
+        "drop_location": request_data["drop_location"],
+        "drop_area": drop_area,
+        "drop_gps": request_data.get("drop_gps"),
+        "delivery_distance_km": delivery_distance,
+        "time_requested": request_data["time_requested"],
+        "reward": request_data["reward"],
+        "status": "open",
+        "accepted_by": None,
+        "acceptor_email": None,
+        "created_at": datetime.now(timezone.utc),
+        "accepted_at": None,
+        "completed_at": None,
+        "updated_at": datetime.now(timezone.utc),
+        "notes": request_data.get("notes"),
+        "deadline": request_data.get("deadline"),
+        "priority": request_data.get("priority", False),
+        "is_expired": False,
+    }
+    
+    # Store in Firestore
+    db.collection('requests').document(request_id).set(request_document)
+    
+    return request_document

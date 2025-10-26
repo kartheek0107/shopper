@@ -57,7 +57,7 @@ def send_verification_email(id_token: str):
 if __name__ == "__main__":
     # Test credentials
     test_email = "kartheekbudimebcs12311022@iiitsonepat.ac.in"
-    test_password = "Test123456"
+    test_password = "xnxx69"
     
     print("🔥 Firebase Token Generator\n")
     print("1. Sign up new user")

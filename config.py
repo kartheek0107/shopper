@@ -16,6 +16,16 @@ class Settings:
         "@iiitsonepat.ac.in"
     )
     
+    # Gmail SMTP Configuration
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_EMAIL = os.getenv("SMTP_EMAIL")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+    SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "College Delivery System")
+    
+    # Frontend URL for verification links
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    
     # API configuration
     API_TITLE = "College Delivery System API"
     API_VERSION = "3.0.0"
@@ -24,11 +34,13 @@ class Settings:
     
     Features:
     - User Authentication with Firebase
+    - Email Verification via Gmail SMTP
     - Request Management with Area Support
     - Connectivity & Reachability Tracking
     - Area-based Filtering
     - Push Notifications (FCM)
     - Real-time User Availability
+    - Deliverer Rating System
     """
     
     # CORS settings (adjust for your frontend)
@@ -64,5 +76,8 @@ class Settings:
     
     # Notification settings
     SEND_NEW_REQUEST_NOTIFICATIONS = True  # Enable/disable new request notifications
+    
+    # Email verification settings
+    VERIFICATION_TOKEN_EXPIRY_HOURS = 24  # Verification link expires in 24 hours
 
 settings = Settings()
