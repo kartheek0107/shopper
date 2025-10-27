@@ -59,7 +59,7 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         "drop_area": request_data.get("drop_area"),
 
         # Item price (required)
-        "item_price": item_price,
+        "item_price": request_data.get("item_price"),
         
         # Reward (auto-calculated or user-provided)
         "reward": reward,

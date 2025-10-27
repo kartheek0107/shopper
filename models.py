@@ -344,7 +344,7 @@ class CreateRequestModelWithGPS(BaseModel):
     # CHANGED: reward is now optional
     reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
     
-    item_price: float = Field(..., gt=0)
+    item_price: Optional[float] = Field(..., gt=0)
     
     # CHANGED: time_requested is now optional
     time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
