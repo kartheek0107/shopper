@@ -96,7 +96,7 @@ class RequestResponse(BaseModel):
     drop_location: str
     drop_area: Optional[str] = None
     time_requested: Optional[datetime] = None  # CHANGED: Now optional
-    item_price: float
+    item_price: Optional[float] = None
     reward: float
     reward_auto_calculated: bool = False  # NEW: Indicates if reward was auto-calculated
     status: RequestStatus
