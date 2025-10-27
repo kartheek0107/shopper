@@ -52,15 +52,12 @@ class Settings:
     
     # Predefined campus areas
     CAMPUS_AREAS = [
-        "A",
-        "B",
-        "C",
-        "D",
-        "Library",
-        "Canteen",
-        "Sports Complex",
-        "Academic Block",
-        "Main Gate"
+        "SBIT",
+        "Pallri",
+        "Bahalgarh",
+        "Sonepat",
+        "TDI",
+        "New Delhi"
     ]
     
     MIN_DEADLINE_HOURS = 1  # Minimum: 1 hour from now

@@ -4,27 +4,141 @@ from typing import List, Optional, Dict
 from fastapi import HTTPException
 import uuid
 
+# Import reward calculator
+from reward_calculator import calculate_reward
+
 # Get Firestore client
 db = firestore.client()
 
 
 # ============================================
-# REQUEST OPERATIONS (Updated for Phase 3)
+# REQUEST OPERATIONS (Updated for Auto Reward + GPS)
 # ============================================
 
 async def create_request(user_uid: str, user_email: str, request_data: dict) -> dict:
     """
-    Create a new request in Firestore with area support
+    Create a new request in Firestore with auto-calculated reward support.
     
-    Args:
-        user_uid: UID of the user creating the request
-        user_email: Email of the user creating the request
-        request_data: Request details including pickup_area and drop_area
+    Changes:
+    - reward is now OPTIONAL - auto-calculated if not provided
+    - time_requested is now OPTIONAL - no longer required
+    - Adds reward_auto_calculated field to track calculation source
+    """
+    
+    # Validate required field: item_price
+    if "item_price" not in request_data:
+        raise HTTPException(status_code=400, detail="item_price is required for every request")
+
+    request_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+
+    item_price = request_data["item_price"]
+    
+    # AUTO-CALCULATE REWARD if not provided
+    if "reward" not in request_data or request_data["reward"] is None:
+        reward = calculate_reward(
+            item_price=item_price,
+            priority=request_data.get("priority", False),
+            pickup_area=request_data.get("pickup_area"),
+            drop_area=request_data.get("drop_area")
+        )
+        reward_auto_calculated = True
+    else:
+        reward = request_data["reward"]
+        reward_auto_calculated = False
+
+    request_document = {
+        "request_id": request_id,
+        "posted_by": user_uid,
+        "poster_email": user_email,
+
+        "item": request_data["item"],
+        "pickup_location": request_data["pickup_location"],
+        "pickup_area": request_data.get("pickup_area"),
+        "drop_location": request_data["drop_location"],
+        "drop_area": request_data.get("drop_area"),
+
+        # Item price (required)
+        "item_price": item_price,
         
-    Returns:
-        dict: Created request with request_id
+        # Reward (auto-calculated or user-provided)
+        "reward": reward,
+        "reward_auto_calculated": reward_auto_calculated,
+
+        # Time requested (now optional)
+        "time_requested": request_data.get("time_requested"),
+
+        "status": "open",
+        "accepted_by": None,
+        "acceptor_email": None,
+
+        # Timestamps
+        "created_at": now,
+        "updated_at": now,
+        "accepted_at": None,
+        "completed_at": None,
+
+        "notes": request_data.get("notes"),
+        "deadline": request_data.get("deadline"),
+        "priority": request_data.get("priority", False),
+        "is_expired": False,
+    }
+
+    db.collection('requests').document(request_id).set(request_document)
+    return request_document
+
+
+async def create_request_with_gps(user_uid: str, user_email: str, request_data: dict) -> dict:
+    """
+    Create request with GPS support and auto-calculated reward
+    Auto-detect areas if GPS provided but areas not specified
     """
     request_id = str(uuid.uuid4())
+    
+    # Auto-detect areas from GPS if not provided
+    pickup_area = request_data.get("pickup_area")
+    drop_area = request_data.get("drop_area")
+    
+    if not pickup_area and request_data.get("pickup_gps"):
+        from location_service import detect_area_from_coordinates
+        pickup_gps = request_data["pickup_gps"]
+        pickup_area = detect_area_from_coordinates(
+            pickup_gps["latitude"], 
+            pickup_gps["longitude"]
+        )
+    
+    if not drop_area and request_data.get("drop_gps"):
+        from location_service import detect_area_from_coordinates
+        drop_gps = request_data["drop_gps"]
+        drop_area = detect_area_from_coordinates(
+            drop_gps["latitude"], 
+            drop_gps["longitude"]
+        )
+    
+    # Calculate delivery distance if both GPS coordinates provided
+    delivery_distance = None
+    if request_data.get("pickup_gps") and request_data.get("drop_gps"):
+        from location_service import calculate_distance
+        pickup_gps = request_data["pickup_gps"]
+        drop_gps = request_data["drop_gps"]
+        delivery_distance = calculate_distance(
+            pickup_gps["latitude"], pickup_gps["longitude"],
+            drop_gps["latitude"], drop_gps["longitude"]
+        )
+    
+    # AUTO-CALCULATE REWARD if not provided (AFTER area detection)
+    item_price = request_data["item_price"]
+    if "reward" not in request_data or request_data["reward"] is None:
+        reward = calculate_reward(
+            item_price=item_price,
+            priority=request_data.get("priority", False),
+            pickup_area=pickup_area,
+            drop_area=drop_area
+        )
+        reward_auto_calculated = True
+    else:
+        reward = request_data["reward"]
+        reward_auto_calculated = False
     
     request_document = {
         "request_id": request_id,
@@ -32,11 +146,21 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         "poster_email": user_email,
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
-        "pickup_area": request_data.get("pickup_area"),
+        "pickup_area": pickup_area,
+        "pickup_gps": request_data.get("pickup_gps"),
         "drop_location": request_data["drop_location"],
-        "drop_area": request_data.get("drop_area"),
-        "time_requested": request_data["time_requested"],
-        "reward": request_data["reward"],
+        "drop_area": drop_area,
+        "drop_gps": request_data.get("drop_gps"),
+        "delivery_distance_km": delivery_distance,
+        
+        # Time requested (now optional)
+        "time_requested": request_data.get("time_requested"),
+        
+        # Item price and reward
+        "item_price": item_price,
+        "reward": reward,
+        "reward_auto_calculated": reward_auto_calculated,
+        
         "status": "open",
         "accepted_by": None,
         "acceptor_email": None,
@@ -54,6 +178,7 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
     db.collection('requests').document(request_id).set(request_document)
     
     return request_document
+
 
 async def mark_expired_requests() -> int:
     """
@@ -95,6 +220,7 @@ async def mark_expired_requests() -> int:
     
     return expired_count
     
+
 async def get_all_requests(
     status: Optional[str] = None,
     pickup_area: Optional[str] = None,
@@ -108,6 +234,7 @@ async def get_all_requests(
         status: Optional status filter
         pickup_area: Optional pickup area filter
         drop_area: Optional drop area filter
+        include_expired: Whether to include expired requests
         
     Returns:
         List[dict]: List of requests
@@ -258,7 +385,8 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
             'status': 'accepted',
             'accepted_by': user_uid,
             'acceptor_email': user_email,
-            'accepted_at': now
+            'accepted_at': now,
+            'updated_at': now
         })
         return request_data
     

@@ -13,14 +13,11 @@ db = firestore.client()
 # Predefined areas in the college campus
 PREDEFINED_AREAS = [
     "SBIT",
-    "CECT",
     "Pallri",
     "Bahalgarh",
     "Sonepat",
     "TDI",
-    "Lakegroove",
-    "KingsBurry",
-    "SuperMax"
+    "New Delhi"
 ]
 
 

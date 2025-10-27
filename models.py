@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator ,EmailStr
+from pydantic import BaseModel, Field, field_validator, EmailStr
 from typing import Optional, List
 from datetime import datetime, timezone
 from enum import Enum
@@ -23,8 +23,15 @@ class CreateRequestModel(BaseModel):
     pickup_area: str = Field(..., description="Pickup area")
     drop_location: str = Field(..., min_length=1, max_length=500)
     drop_area: str = Field(..., description="Drop area")
-    reward: float = Field(..., gt=0, description="Reward amount (must be positive)")
-    time_requested: datetime = Field(..., description="When the delivery is needed")
+    
+    # CHANGED: reward is now optional (auto-calculated if not provided)
+    reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
+    
+    item_price: float = Field(..., gt=0, description="Total item price (must be positive)")
+    
+    # CHANGED: time_requested is now optional (removed from app logic)
+    time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
+    
     notes: Optional[str] = Field(None, max_length=1000, description="Additional notes")
     deadline: datetime = Field(..., description="Deadline for request completion")
     priority: bool = Field(default=False, description="Whether the request is high priority")
@@ -41,17 +48,32 @@ class CreateRequestModel(BaseModel):
                 raise ValueError('Each item must be less than 200 characters')
         return v
     
+    @field_validator('reward')
+    @classmethod
+    def validate_reward(cls, v):
+        """Validate reward is positive if provided"""
+        if v is not None and v <= 0:
+            raise ValueError('reward must be positive if provided')
+        return v
+    
     @field_validator('time_requested')
     @classmethod
     def time_must_be_future(cls, v):
+        """Validate time_requested is in future (if provided)"""
+        if v is None:
+            return v  # Allow None
+        
         now = datetime.now(timezone.utc)
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
         if v <= now:
             raise ValueError('time_requested must be in the future')
-        return v 
+        return v
+    
+    @field_validator('deadline')
     @classmethod
-    def deadline_must_be_future_and_reasonable(cls, v, info):
+    def deadline_must_be_future(cls, v):
+        """Validate deadline is in future"""
         now = datetime.now(timezone.utc)
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
@@ -59,11 +81,6 @@ class CreateRequestModel(BaseModel):
         # Must be in future
         if v <= now:
             raise ValueError('deadline must be in the future')
-        
-        # Optional: Check deadline is after time_requested
-        time_requested = info.data.get('time_requested')
-        if time_requested and v < time_requested:
-            raise ValueError('deadline must be after time_requested')
         
         return v
 
@@ -78,8 +95,10 @@ class RequestResponse(BaseModel):
     pickup_area: Optional[str] = None
     drop_location: str
     drop_area: Optional[str] = None
-    time_requested: datetime
+    time_requested: Optional[datetime] = None  # CHANGED: Now optional
+    item_price: float
     reward: float
+    reward_auto_calculated: bool = False  # NEW: Indicates if reward was auto-calculated
     status: RequestStatus
     accepted_by: Optional[str] = None
     acceptor_email: Optional[str] = None
@@ -220,7 +239,6 @@ class EnhancedDashboardResponse(BaseModel):
     nearby_requests: List[RequestResponse]
 
 
-
 # ============================================
 # RATING MODELS
 # ============================================
@@ -290,8 +308,9 @@ class RatingsGivenResponse(BaseModel):
     ratings: List[dict]
     total: int
 
+
 # ============================================
-# LOCATION MODELS
+# LOCATION MODELS (GPS Support)
 # ============================================  
 class GPSCoordinates(BaseModel):
     """GPS coordinates model"""
@@ -322,11 +341,46 @@ class CreateRequestModelWithGPS(BaseModel):
     pickup_area: Optional[str] = Field(None, description="Pickup area")
     drop_area: Optional[str] = Field(None, description="Drop area")
     
-    reward: float = Field(..., gt=0)
-    time_requested: datetime
+    # CHANGED: reward is now optional
+    reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
+    
+    item_price: float = Field(..., gt=0)
+    
+    # CHANGED: time_requested is now optional
+    time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
+    
     notes: Optional[str] = Field(None, max_length=1000)
     deadline: datetime
     priority: bool = Field(default=False)
+    
+    @field_validator('reward')
+    @classmethod
+    def validate_reward(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('reward must be positive if provided')
+        return v
+    
+    @field_validator('time_requested')
+    @classmethod
+    def time_must_be_future(cls, v):
+        if v is None:
+            return v
+        now = datetime.now(timezone.utc)
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        if v <= now:
+            raise ValueError('time_requested must be in the future')
+        return v
+    
+    @field_validator('deadline')
+    @classmethod
+    def deadline_must_be_future(cls, v):
+        now = datetime.now(timezone.utc)
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        if v <= now:
+            raise ValueError('deadline must be in the future')
+        return v
 
 
 class RequestResponseWithGPS(BaseModel):
@@ -351,8 +405,9 @@ class RequestResponseWithGPS(BaseModel):
     # Calculated distance (if GPS available)
     delivery_distance_km: Optional[float] = None
     
-    time_requested: datetime
+    time_requested: Optional[datetime] = None  # CHANGED: Now optional
     reward: float
+    reward_auto_calculated: bool = False  # NEW: Indicates if reward was auto-calculated
     status: str
     accepted_by: Optional[str] = None
     acceptor_email: Optional[str] = None
@@ -364,85 +419,3 @@ class RequestResponseWithGPS(BaseModel):
     
     # Distance from current user (if querying nearby)
     distance_from_user_km: Optional[float] = None
-
-
-# Update your create_request function in database.py
-# Add these imports at the top of database.py if not already there
-from firebase_admin import firestore
-import uuid
-from datetime import datetime, timezone
-
-db = firestore.client()
-
-async def create_request_with_gps(user_uid: str, user_email: str, request_data: dict) -> dict:
-    """
-    Create request with GPS support
-    Auto-detect areas if GPS provided but areas not specified
-    """
-    import uuid
-    from datetime import datetime, timezone
-    
-    request_id = str(uuid.uuid4())
-    
-    # Auto-detect areas from GPS if not provided
-    pickup_area = request_data.get("pickup_area")
-    drop_area = request_data.get("drop_area")
-    
-    if not pickup_area and request_data.get("pickup_gps"):
-        from location_service import detect_area_from_coordinates
-        pickup_gps = request_data["pickup_gps"]
-        pickup_area = detect_area_from_coordinates(
-            pickup_gps["latitude"], 
-            pickup_gps["longitude"]
-        )
-    
-    if not drop_area and request_data.get("drop_gps"):
-        from location_service import detect_area_from_coordinates
-        drop_gps = request_data["drop_gps"]
-        drop_area = detect_area_from_coordinates(
-            drop_gps["latitude"], 
-            drop_gps["longitude"]
-        )
-    
-    # Calculate delivery distance if both GPS coordinates provided
-    delivery_distance = None
-    if request_data.get("pickup_gps") and request_data.get("drop_gps"):
-        from location_service import calculate_distance
-        pickup_gps = request_data["pickup_gps"]
-        drop_gps = request_data["drop_gps"]
-        delivery_distance = calculate_distance(
-            pickup_gps["latitude"], pickup_gps["longitude"],
-            drop_gps["latitude"], drop_gps["longitude"]
-        )
-    
-    request_document = {
-        "request_id": request_id,
-        "posted_by": user_uid,
-        "poster_email": user_email,
-        "item": request_data["item"],
-        "pickup_location": request_data["pickup_location"],
-        "pickup_area": pickup_area,
-        "pickup_gps": request_data.get("pickup_gps"),
-        "drop_location": request_data["drop_location"],
-        "drop_area": drop_area,
-        "drop_gps": request_data.get("drop_gps"),
-        "delivery_distance_km": delivery_distance,
-        "time_requested": request_data["time_requested"],
-        "reward": request_data["reward"],
-        "status": "open",
-        "accepted_by": None,
-        "acceptor_email": None,
-        "created_at": datetime.now(timezone.utc),
-        "accepted_at": None,
-        "completed_at": None,
-        "updated_at": datetime.now(timezone.utc),
-        "notes": request_data.get("notes"),
-        "deadline": request_data.get("deadline"),
-        "priority": request_data.get("priority", False),
-        "is_expired": False,
-    }
-    
-    # Store in Firestore
-    db.collection('requests').document(request_id).set(request_document)
-    
-    return request_document
