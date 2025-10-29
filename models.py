@@ -13,121 +13,34 @@ class RequestStatus(str, Enum):
 
 
 # ============================================
-# REQUEST MODELS
-# ============================================
-
-class CreateRequestModel(BaseModel):
-    """Model for creating a new request with area support"""
-    item: List[str] = Field(..., min_length=1, max_length=200)
-    pickup_location: str = Field(..., min_length=1, max_length=500)
-    pickup_area: str = Field(..., description="Pickup area")
-    drop_location: str = Field(..., min_length=1, max_length=500)
-    drop_area: str = Field(..., description="Drop area")
-    
-    # CHANGED: reward is now optional (auto-calculated if not provided)
-    reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
-    
-    item_price: float = Field(..., gt=0, description="Total item price (must be positive)")
-    
-    # CHANGED: time_requested is now optional (removed from app logic)
-    time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
-    
-    notes: Optional[str] = Field(None, max_length=1000, description="Additional notes")
-    deadline: datetime = Field(..., description="Deadline for request completion")
-    priority: bool = Field(default=False, description="Whether the request is high priority")
-
-    @field_validator('item')
-    @classmethod
-    def validate_items(cls, v):
-        if not v or len(v) == 0:
-            raise ValueError('At least one item must be specified')
-        for item in v:
-            if not item or len(item.strip()) == 0:
-                raise ValueError('Items cannot be empty')
-            if len(item) > 200:
-                raise ValueError('Each item must be less than 200 characters')
-        return v
-    
-    @field_validator('reward')
-    @classmethod
-    def validate_reward(cls, v):
-        """Validate reward is positive if provided"""
-        if v is not None and v <= 0:
-            raise ValueError('reward must be positive if provided')
-        return v
-    
-    @field_validator('time_requested')
-    @classmethod
-    def time_must_be_future(cls, v):
-        """Validate time_requested is in future (if provided)"""
-        if v is None:
-            return v  # Allow None
-        
-        now = datetime.now(timezone.utc)
-        if v.tzinfo is None:
-            v = v.replace(tzinfo=timezone.utc)
-        if v <= now:
-            raise ValueError('time_requested must be in the future')
-        return v
-    
-    @field_validator('deadline')
-    @classmethod
-    def deadline_must_be_future(cls, v):
-        """Validate deadline is in future"""
-        now = datetime.now(timezone.utc)
-        if v.tzinfo is None:
-            v = v.replace(tzinfo=timezone.utc)
-        
-        # Must be in future
-        if v <= now:
-            raise ValueError('deadline must be in the future')
-        
-        return v
-
-
-class RequestResponse(BaseModel):
-    """Model for request response with area fields"""
-    request_id: str
-    posted_by: str
-    poster_email: str
-    item: List[str]
-    pickup_location: str
-    pickup_area: Optional[str] = None
-    drop_location: str
-    drop_area: Optional[str] = None
-    time_requested: Optional[datetime] = None  # CHANGED: Now optional
-    item_price: Optional[float] = None
-    reward: float
-    reward_auto_calculated: bool = False  # NEW: Indicates if reward was auto-calculated
-    status: RequestStatus
-    accepted_by: Optional[str] = None
-    acceptor_email: Optional[str] = None
-    created_at: datetime
-    notes: Optional[str] = None
-    deadline: datetime
-    priority: bool 
-    is_expired: bool = False
-
-
-class AcceptRequestModel(BaseModel):
-    """Model for accepting a request"""
-    request_id: str
-
-
-class UpdateRequestStatusModel(BaseModel):
-    """Model for updating request status"""
-    request_id: str
-    status: RequestStatus
-
-
-# ============================================
-# USER MODELS (Phase 3)
+# CONNECTIVITY MODELS (UPDATED WITH DEVICE_ID)
 # ============================================
 
 class UpdateConnectivityModel(BaseModel):
-    """Model for updating connectivity status"""
+    """Model for updating connectivity status with device tracking"""
     is_connected: bool = Field(..., description="Internet connectivity status")
     location_permission_granted: bool = Field(..., description="Location permission status")
+    device_id: Optional[str] = Field(
+        None, 
+        description="Unique device identifier (Android ID, IDFV, or app-generated UUID)",
+        min_length=1,
+        max_length=255
+    )
+    device_info: Optional[dict] = Field(
+        None,
+        description="Optional device metadata (OS, model, app version)"
+    )
+
+    @field_validator('device_id')
+    @classmethod
+    def validate_device_id(cls, v):
+        """Validate device_id format"""
+        if v is not None:
+            # Strip whitespace
+            v = v.strip()
+            if not v:
+                raise ValueError('device_id cannot be empty string')
+        return v
 
 
 class SetPreferredAreasModel(BaseModel):
@@ -150,7 +63,7 @@ class RegisterFCMTokenModel(BaseModel):
 
 
 class UserProfileResponse(BaseModel):
-    """Enhanced user profile response"""
+    """Enhanced user profile response with device tracking"""
     uid: str
     email: str
     name: Optional[str] = None
@@ -167,6 +80,11 @@ class UserProfileResponse(BaseModel):
     location_permission_granted: bool = False
     last_connectivity_check: Optional[datetime] = None
     
+    # Device tracking (NEW)
+    device_id: Optional[str] = None
+    device_info: Optional[dict] = None
+    device_registered_at: Optional[datetime] = None
+    
     # FCM
     fcm_token: Optional[str] = None
     
@@ -179,6 +97,106 @@ class UpdateProfileModel(BaseModel):
     """Model for updating user profile"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     phone: Optional[str] = Field(None, max_length=20)
+
+
+# ============================================
+# REQUEST MODELS
+# ============================================
+
+class CreateRequestModel(BaseModel):
+    """Model for creating a new request with area support"""
+    item: List[str] = Field(..., min_length=1, max_length=200)
+    pickup_location: str = Field(..., min_length=1, max_length=500)
+    pickup_area: str = Field(..., description="Pickup area")
+    drop_location: str = Field(..., min_length=1, max_length=500)
+    drop_area: str = Field(..., description="Drop area")
+    
+    reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
+    item_price: float = Field(..., gt=0, description="Total item price (must be positive)")
+    time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
+    
+    notes: Optional[str] = Field(None, max_length=1000, description="Additional notes")
+    deadline: datetime = Field(..., description="Deadline for request completion")
+    priority: bool = Field(default=False, description="Whether the request is high priority")
+
+    @field_validator('item')
+    @classmethod
+    def validate_items(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one item must be specified')
+        for item in v:
+            if not item or len(item.strip()) == 0:
+                raise ValueError('Items cannot be empty')
+            if len(item) > 200:
+                raise ValueError('Each item must be less than 200 characters')
+        return v
+    
+    @field_validator('reward')
+    @classmethod
+    def validate_reward(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('reward must be positive if provided')
+        return v
+    
+    @field_validator('time_requested')
+    @classmethod
+    def time_must_be_future(cls, v):
+        if v is None:
+            return v
+        
+        now = datetime.now(timezone.utc)
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        if v <= now:
+            raise ValueError('time_requested must be in the future')
+        return v
+    
+    @field_validator('deadline')
+    @classmethod
+    def deadline_must_be_future(cls, v):
+        now = datetime.now(timezone.utc)
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        
+        if v <= now:
+            raise ValueError('deadline must be in the future')
+        
+        return v
+
+
+class RequestResponse(BaseModel):
+    """Model for request response with area fields"""
+    request_id: str
+    posted_by: str
+    poster_email: str
+    item: List[str]
+    pickup_location: str
+    pickup_area: Optional[str] = None
+    drop_location: str
+    drop_area: Optional[str] = None
+    time_requested: Optional[datetime] = None
+    item_price: Optional[float] = None
+    reward: float
+    reward_auto_calculated: bool = False
+    status: RequestStatus
+    accepted_by: Optional[str] = None
+    acceptor_email: Optional[str] = None
+    created_at: datetime
+    notes: Optional[str] = None
+    deadline: datetime
+    priority: bool 
+    is_expired: bool = False
+
+
+class AcceptRequestModel(BaseModel):
+    """Model for accepting a request"""
+    request_id: str
+
+
+class UpdateRequestStatusModel(BaseModel):
+    """Model for updating request status"""
+    request_id: str
+    status: RequestStatus
 
 
 # ============================================
@@ -214,6 +232,7 @@ class ReachabilityStatusResponse(BaseModel):
     location_permission_granted: bool
     last_connectivity_check: Optional[datetime]
     message: str
+    device_id: Optional[str] = None  # NEW: Include device_id in response
 
 
 class AreaCountResponse(BaseModel):
@@ -222,12 +241,14 @@ class AreaCountResponse(BaseModel):
 
 
 class ConnectivityStatsResponse(BaseModel):
-    """Overall connectivity statistics"""
+    """Overall connectivity statistics with device tracking"""
     total_users: int
     reachable_users: int
     connected_users: int
     location_granted_users: int
     reachable_percentage: float
+    unique_devices: int = Field(0, description="Number of unique devices")  # NEW
+    multi_device_users: int = Field(0, description="Users with multiple devices")  # NEW
 
 
 class EnhancedDashboardResponse(BaseModel):
@@ -244,7 +265,7 @@ class EnhancedDashboardResponse(BaseModel):
 # ============================================
 
 class CreateRatingModel(BaseModel):
-    """Model for creating a rating (poster rates deliverer)"""
+    """Model for creating a rating"""
     request_id: str = Field(..., description="ID of the completed request")
     rating: int = Field(..., ge=1, le=5, description="Rating value (1-5 stars)")
     comment: Optional[str] = Field(None, max_length=500, description="Optional feedback comment")
@@ -289,7 +310,7 @@ class RatingStatsResponse(BaseModel):
 
 
 class UserRatingsResponse(BaseModel):
-    """Model for user's received ratings (as deliverer)"""
+    """Model for user's received ratings"""
     stats: RatingStatsResponse
     ratings: List[dict]
 
@@ -304,7 +325,7 @@ class CanRateResponse(BaseModel):
 
 
 class RatingsGivenResponse(BaseModel):
-    """Model for ratings given by user (as poster)"""
+    """Model for ratings given by user"""
     ratings: List[dict]
     total: int
 
@@ -317,105 +338,3 @@ class GPSCoordinates(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
     accuracy: Optional[float] = Field(None, description="Accuracy in meters")
-
-
-class CreateRequestModelWithGPS(BaseModel):
-    """Enhanced request model with GPS coordinates"""
-    item: List[str] = Field(..., min_length=1, max_length=200)
-    
-    # Text locations (still needed for display)
-    pickup_location: str = Field(..., min_length=1, max_length=500)
-    drop_location: str = Field(..., min_length=1, max_length=500)
-    
-    # GPS coordinates (optional but recommended)
-    pickup_gps: Optional[GPSCoordinates] = Field(
-        None, 
-        description="GPS coordinates of pickup location"
-    )
-    drop_gps: Optional[GPSCoordinates] = Field(
-        None, 
-        description="GPS coordinates of drop location"
-    )
-    
-    # Areas (auto-detected from GPS or manually selected)
-    pickup_area: Optional[str] = Field(None, description="Pickup area")
-    drop_area: Optional[str] = Field(None, description="Drop area")
-    
-    # CHANGED: reward is now optional
-    reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
-    
-    item_price: Optional[float] = Field(..., gt=0)
-    
-    # CHANGED: time_requested is now optional
-    time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
-    
-    notes: Optional[str] = Field(None, max_length=1000)
-    deadline: datetime
-    priority: bool = Field(default=False)
-    
-    @field_validator('reward')
-    @classmethod
-    def validate_reward(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError('reward must be positive if provided')
-        return v
-    
-    @field_validator('time_requested')
-    @classmethod
-    def time_must_be_future(cls, v):
-        if v is None:
-            return v
-        now = datetime.now(timezone.utc)
-        if v.tzinfo is None:
-            v = v.replace(tzinfo=timezone.utc)
-        if v <= now:
-            raise ValueError('time_requested must be in the future')
-        return v
-    
-    @field_validator('deadline')
-    @classmethod
-    def deadline_must_be_future(cls, v):
-        now = datetime.now(timezone.utc)
-        if v.tzinfo is None:
-            v = v.replace(tzinfo=timezone.utc)
-        if v <= now:
-            raise ValueError('deadline must be in the future')
-        return v
-
-
-class RequestResponseWithGPS(BaseModel):
-    """Enhanced request response with GPS and distance"""
-    request_id: str
-    posted_by: str
-    poster_email: str
-    item: List[str]
-    
-    # Text locations
-    pickup_location: str
-    drop_location: str
-    
-    # GPS coordinates
-    pickup_gps: Optional[dict] = None
-    drop_gps: Optional[dict] = None
-    
-    # Areas
-    pickup_area: Optional[str] = None
-    drop_area: Optional[str] = None
-    
-    # Calculated distance (if GPS available)
-    delivery_distance_km: Optional[float] = None
-    
-    time_requested: Optional[datetime] = None  # CHANGED: Now optional
-    reward: float
-    reward_auto_calculated: bool = False  # NEW: Indicates if reward was auto-calculated
-    status: str
-    accepted_by: Optional[str] = None
-    acceptor_email: Optional[str] = None
-    created_at: datetime
-    notes: Optional[str] = None
-    deadline: datetime
-    priority: bool
-    is_expired: bool = False
-    
-    # Distance from current user (if querying nearby)
-    distance_from_user_km: Optional[float] = None

@@ -1,6 +1,6 @@
 """
-Area Management and Filtering System
-Handles predefined areas, user preferences, and area-based filtering
+Area Management and Filtering System with Device-based Counting
+Handles predefined areas, user preferences, and device-aware area-based filtering
 """
 
 from typing import List, Optional, Dict
@@ -128,43 +128,98 @@ async def set_user_current_area(user_uid: str, area: Optional[str]) -> Dict:
     return user_doc.to_dict()
 
 
-async def get_reachable_users_count(area: Optional[str] = None) -> int:
+async def get_reachable_users_count(
+    area: Optional[str] = None,
+    count_by_device: bool = True
+) -> int:
     """
     Get count of reachable users, optionally filtered by area
     
+    Changes:
+    - Now supports device-based counting to avoid double-counting
+    - If count_by_device=True, counts unique devices instead of users
+    - Falls back to UID counting for users without device_id
+    
     Args:
         area: Optional area filter
+        count_by_device: If True, count unique devices; if False, count users
         
     Returns:
-        int: Count of reachable users
+        int: Count of reachable users or unique devices
     """
     users_ref = db.collection('users')
     query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
     
-    if not area:
-        return len(list(query.stream()))
+    if not count_by_device:
+        # Original logic: count all users
+        if not area:
+            return len(list(query.stream()))
+        
+        # Filter by preferred areas
+        count = 0
+        for user_doc in query.stream():
+            user_data = user_doc.to_dict()
+            preferred_areas = user_data.get('preferred_areas', [])
+            if area in preferred_areas:
+                count += 1
+        return count
     
-    # Filter by preferred areas
-    count = 0
+    # NEW: Device-based counting
+    unique_identifiers = set()
+    
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
-        preferred_areas = user_data.get('preferred_areas', [])
-        if area in preferred_areas:
-            count += 1
+        
+        # Filter by area if specified
+        if area:
+            preferred_areas = user_data.get('preferred_areas', [])
+            if area not in preferred_areas:
+                continue
+        
+        # Use device_id if available, otherwise fallback to uid
+        identifier = user_data.get('device_id') or user_data.get('uid')
+        if identifier:
+            unique_identifiers.add(identifier)
     
-    return count
+    return len(unique_identifiers)
 
 
-async def get_reachable_users_by_area() -> Dict[str, int]:
+async def get_reachable_users_by_area(count_by_device: bool = True) -> Dict[str, int]:
     """
-    Get count of reachable users grouped by area
+    Get count of reachable users grouped by area with device-aware counting
     
+    Changes:
+    - Now supports device-based counting per area
+    - Prevents double-counting across all areas
+    
+    Args:
+        count_by_device: If True, count unique devices per area
+        
     Returns:
         dict: Area name -> count mapping
     """
     users_ref = db.collection('users')
     query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
     
+    if count_by_device:
+        # NEW: Device-based counting per area
+        area_device_sets = {area: set() for area in PREDEFINED_AREAS}
+        
+        for user_doc in query.stream():
+            user_data = user_doc.to_dict()
+            preferred_areas = user_data.get('preferred_areas', [])
+            
+            # Get unique identifier (device_id or uid)
+            identifier = user_data.get('device_id') or user_data.get('uid')
+            
+            if identifier:
+                for area in preferred_areas:
+                    if area in area_device_sets:
+                        area_device_sets[area].add(identifier)
+        
+        return {area: len(devices) for area, devices in area_device_sets.items()}
+    
+    # Original logic: user-based counting
     area_counts = {area: 0 for area in PREDEFINED_AREAS}
     
     for user_doc in query.stream():
@@ -185,12 +240,14 @@ async def get_available_users(
     """
     Get list of available (reachable) users with optional filters
     
+    Note: This returns full user info, so device_id is included
+    
     Args:
         area: Filter by specific area
         preferred_areas_only: Only return users with preferred areas set
         
     Returns:
-        List[dict]: List of available users
+        List[dict]: List of available users with device info
     """
     users_ref = db.collection('users')
     query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
@@ -209,13 +266,15 @@ async def get_available_users(
         if area and area not in preferred_areas:
             continue
         
-        # Don't expose sensitive info
+        # Include device info in response
         available_users.append({
             'uid': user_data.get('uid'),
             'email': user_data.get('email'),
             'name': user_data.get('name'),
             'preferred_areas': preferred_areas,
-            'current_area': user_data.get('current_area')
+            'current_area': user_data.get('current_area'),
+            'device_id': user_data.get('device_id'),  # NEW
+            'device_info': user_data.get('device_info')  # NEW
         })
     
     return available_users
@@ -245,7 +304,7 @@ async def get_requests_by_area(
     else:
         query = requests_ref
     
-    # Get all and filter in memory (Firestore doesn't support complex OR queries well)
+    # Get all and filter in memory
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
@@ -318,3 +377,50 @@ async def get_nearby_requests(user_uid: str) -> List[Dict]:
     nearby_requests.sort(key=lambda x: x.get('created_at', ''), reverse=True)
     
     return nearby_requests
+
+
+async def get_area_device_analytics() -> Dict:
+    """
+    Get analytics about device distribution across areas
+    
+    Returns:
+        dict: Device analytics per area
+    """
+    users_ref = db.collection('users')
+    query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
+    
+    area_analytics = {area: {
+        'unique_devices': set(),
+        'total_users': 0,
+        'users_without_device': 0
+    } for area in PREDEFINED_AREAS}
+    
+    for user_doc in query.stream():
+        user_data = user_doc.to_dict()
+        preferred_areas = user_data.get('preferred_areas', [])
+        device_id = user_data.get('device_id')
+        
+        for area in preferred_areas:
+            if area in area_analytics:
+                area_analytics[area]['total_users'] += 1
+                
+                if device_id:
+                    area_analytics[area]['unique_devices'].add(device_id)
+                else:
+                    area_analytics[area]['users_without_device'] += 1
+    
+    # Convert sets to counts
+    result = {}
+    for area, data in area_analytics.items():
+        result[area] = {
+            'unique_devices': len(data['unique_devices']),
+            'total_users': data['total_users'],
+            'users_without_device': data['users_without_device'],
+            'device_coverage_pct': round(
+                (len(data['unique_devices']) / data['total_users'] * 100) 
+                if data['total_users'] > 0 else 0, 
+                2
+            )
+        }
+    
+    return result

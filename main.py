@@ -11,6 +11,7 @@ from auth import get_current_user, verify_email_domain
 from scheduler import cleanup_expired_requests_job
 from database import mark_expired_requests
 import asyncio
+from datetime import datetime
 
 db = firestore.client()
 
@@ -106,12 +107,13 @@ async def root():
     """Health check endpoint"""
     return {
         "status": "ok",
-        "message": "College Delivery System API - Phase 3",
+        "message": "College Delivery System API - Phase 3 with Device Tracking",
         "version": settings.API_VERSION,
         "features": [
             "User Authentication",
             "Request Management with Area Support",
             "Connectivity & Reachability Tracking",
+            "Device Tracking & Multi-Account Detection",
             "Area-based Filtering",
             "Push Notifications (FCM)",
             "Real-time User Availability",
@@ -147,7 +149,7 @@ async def get_current_user_endpoint(current_user: dict = Depends(get_current_use
 
 
 # ============================================
-# CONNECTIVITY ENDPOINTS (Phase 3)
+# CONNECTIVITY ENDPOINTS (Phase 3 - UPDATED WITH DEVICE TRACKING)
 # ============================================
 
 @app.post("/user/connectivity/update", response_model=SuccessResponse)
@@ -156,16 +158,35 @@ async def update_connectivity_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Update user's connectivity status and auto-compute reachability
+    Update user's connectivity status and auto-compute reachability with device tracking
+    
+    Changes in this version:
+    - Now accepts optional device_id and device_info
+    - Enables accurate device counting and multi-account detection
+    - Fully backward compatible (device_id is optional)
     
     Should be called by app every 5 minutes or when connectivity changes.
     Reachability is automatically calculated as: is_connected AND location_permission_granted
+    
+    Request Body:
+    {
+        "is_connected": true,
+        "location_permission_granted": true,
+        "device_id": "android-abc123xyz",  // Optional but recommended
+        "device_info": {                   // Optional
+            "os": "Android",
+            "model": "Samsung Galaxy S21",
+            "app_version": "1.0.5"
+        }
+    }
     """
     try:
         updated_user = await update_connectivity_status(
             user_uid=current_user["uid"],
             is_connected=data.is_connected,
-            location_permission_granted=data.location_permission_granted
+            location_permission_granted=data.location_permission_granted,
+            device_id=data.device_id,      # NEW
+            device_info=data.device_info   # NEW
         )
         
         return {
@@ -174,7 +195,9 @@ async def update_connectivity_endpoint(
             "data": {
                 "is_reachable": updated_user.get('is_reachable'),
                 "is_connected": data.is_connected,
-                "location_permission_granted": data.location_permission_granted
+                "location_permission_granted": data.location_permission_granted,
+                "device_id": updated_user.get('device_id'),  # NEW
+                "device_tracked": data.device_id is not None  # NEW
             }
         }
     except Exception as e:
@@ -185,7 +208,11 @@ async def update_connectivity_endpoint(
 async def get_reachability_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
-    """Get current reachability status"""
+    """
+    Get current reachability status with device information
+    
+    Returns connectivity status plus device tracking info if available
+    """
     try:
         status = await get_reachability_status(current_user["uid"])
         return status
@@ -754,22 +781,50 @@ async def calculate_delivery_distance_endpoint(
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
 # ============================================
-# REACHABLE USERS COUNT (Phase 3)
+# UPDATED REACHABLE USERS COUNT WITH DEVICE TRACKING
 # ============================================
 
 @app.get("/users/reachable-count")
 async def get_reachable_count_endpoint(
     area: Optional[str] = Query(None, description="Filter by specific area"),
+    count_by_device: bool = Query(True, description="Count unique devices instead of users"),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get count of reachable users, optionally filtered by area"""
+    """
+    Get count of reachable users or unique devices, optionally filtered by area
+    
+    NEW PARAMETER:
+    - count_by_device: If true (default), counts unique devices; if false, counts users
+    
+    Benefits of device counting:
+    - Prevents double-counting users with multiple accounts
+    - More accurate availability metrics
+    - Better capacity planning
+    
+    Examples:
+    - GET /users/reachable-count?area=SBIT&count_by_device=true
+      Returns: Unique devices in SBIT area
+    
+    - GET /users/reachable-count?count_by_device=false
+      Returns: Total user count (old behavior)
+    """
     try:
-        count = await get_reachable_users_count(area=area)
+        count = await get_reachable_users_count(
+            area=area,
+            count_by_device=count_by_device
+        )
+        
+        counting_method = "unique_devices" if count_by_device else "users"
+        area_msg = f" in {area}" if area else ""
+        
         return {
             "count": count,
+            "counting_method": counting_method,  # NEW
             "area": area or "all",
-            "message": f"{count} reachable users" + (f" in {area}" if area else "")
+            "message": f"{count} {counting_method} available{area_msg}"
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -777,12 +832,28 @@ async def get_reachable_count_endpoint(
 
 @app.get("/users/reachable-by-area", response_model=AreaCountResponse)
 async def get_reachable_by_area_endpoint(
+    count_by_device: bool = Query(True, description="Count unique devices per area"),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get count of reachable users grouped by all areas"""
+    """
+    Get count of reachable users or devices grouped by all areas
+    
+    NEW PARAMETER:
+    - count_by_device: If true (default), counts unique devices per area
+    
+    Note: When device counting is enabled, same device won't be counted 
+    multiple times across different areas
+    """
     try:
-        area_counts = await get_reachable_users_by_area()
-        return {"area_counts": area_counts}
+        area_counts = await get_reachable_users_by_area(
+            count_by_device=count_by_device
+        )
+        
+        return {
+            "area_counts": area_counts,
+            "counting_method": "unique_devices" if count_by_device else "users",  # NEW
+            "note": "Counts represent unique devices per area" if count_by_device else "Counts represent users per area"
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -803,6 +874,102 @@ async def get_available_users_endpoint(
             "users": users,
             "total": len(users)
         }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================
+# NEW DEVICE ANALYTICS ENDPOINTS
+# ============================================
+
+@app.get("/users/unique-devices")
+async def get_unique_devices_endpoint(
+    area: Optional[str] = Query(None, description="Filter by specific area"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get count of unique reachable devices with detailed breakdown
+    
+    Returns:
+    - Unique device count
+    - Total user count for comparison
+    - Users without device_id (using fallback counting)
+    
+    Useful for:
+    - Monitoring device adoption
+    - Identifying deduplication effectiveness
+    - Capacity planning
+    """
+    try:
+        from connectivity import get_unique_reachable_devices
+        
+        result = await get_unique_reachable_devices(area=area)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/analytics/device-distribution")
+async def get_device_distribution_endpoint(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get device analytics across all areas
+    
+    Returns per-area breakdown:
+    - Unique devices
+    - Total users
+    - Users without device_id
+    - Device coverage percentage
+    
+    Useful for:
+    - Understanding device adoption per area
+    - Identifying areas needing mobile app updates
+    - Monitoring system health
+    """
+    try:
+        from areas import get_area_device_analytics
+        
+        analytics = await get_area_device_analytics()
+        return {
+            "area_analytics": analytics,
+            "summary": {
+                "total_unique_devices": sum(a['unique_devices'] for a in analytics.values()),
+                "total_users": sum(a['total_users'] for a in analytics.values()),
+                "overall_coverage_pct": round(
+                    sum(a['unique_devices'] for a in analytics.values()) / 
+                    sum(a['total_users'] for a in analytics.values()) * 100
+                    if sum(a['total_users'] for a in analytics.values()) > 0 else 0,
+                    2
+                )
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/analytics/device-info")
+async def get_device_analytics_endpoint(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get detailed device analytics including OS distribution
+    
+    Returns:
+    - Total devices tracked
+    - OS distribution (Android, iOS counts)
+    - Devices with multiple accounts (edge case detection)
+    
+    Useful for:
+    - Platform distribution insights
+    - Multi-account detection
+    - System monitoring
+    """
+    try:
+        from connectivity import get_device_analytics
+        
+        analytics = await get_device_analytics()
+        return analytics
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1432,7 +1599,7 @@ async def dashboard_endpoint(current_user: dict = Depends(get_current_user)):
 
 
 # ============================================
-# ADMIN/STATS ENDPOINTS (Optional)
+# UPDATED ADMIN/STATS ENDPOINT WITH DEVICE TRACKING
 # ============================================
 
 @app.get("/admin/connectivity-stats", response_model=ConnectivityStatsResponse)
@@ -1440,13 +1607,68 @@ async def get_connectivity_stats_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Get overall connectivity statistics
+    Get overall connectivity statistics with device tracking
+    
+    NEW FIELDS:
+    - unique_devices: Count of unique devices
+    - users_with_devices: Users who have device_id registered
+    - multi_device_users: Edge case indicator (should be near 0)
     
     Note: In production, this should be admin-only
     """
     try:
         stats = await get_connectivity_stats()
         return stats
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================
+# HELPER ENDPOINT FOR TESTING DEVICE TRACKING
+# ============================================
+
+@app.get("/debug/device-count-comparison")
+async def device_count_comparison_endpoint(
+    area: Optional[str] = Query(None, description="Optional area filter"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Compare user-based vs device-based counting
+    
+    Useful for:
+    - Verifying device counting works correctly
+    - Understanding deduplication impact
+    - Testing and debugging
+    
+    Returns side-by-side comparison of both counting methods
+    """
+    try:
+        # Get counts using both methods
+        user_count = await get_reachable_users_count(
+            area=area, 
+            count_by_device=False
+        )
+        
+        device_count = await get_reachable_users_count(
+            area=area, 
+            count_by_device=True
+        )
+        
+        deduplication_count = user_count - device_count
+        
+        return {
+            "area": area or "all",
+            "user_based_count": user_count,
+            "device_based_count": device_count,
+            "deduplication_impact": {
+                "duplicate_accounts_detected": deduplication_count,
+                "reduction_percentage": round(
+                    (deduplication_count / user_count * 100) if user_count > 0 else 0,
+                    2
+                )
+            },
+            "recommendation": "Use device_based_count for accurate availability" if deduplication_count > 0 else "Both methods show same count"
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
