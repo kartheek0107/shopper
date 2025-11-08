@@ -1,13 +1,12 @@
 """
-Migration Script: Fix Old Request Data
-Run this once to migrate old requests to new schema
+Migration Script: Add item_price to Old Requests
+Run this once to add missing item_price field to old requests
 """
 
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime, timezone, timedelta
 
-# Initialize Firebase (adjust path if needed)
+# Initialize Firebase
 cred = credentials.Certificate("firebase-credentials.json")
 try:
     firebase_admin.get_app()
@@ -16,157 +15,108 @@ except ValueError:
 
 db = firestore.client()
 
-def migrate_requests():
+def migrate_item_price():
     """
-    Migrate old requests to match new schema:
-    1. Convert 'item' from string to list
-    2. Add missing 'deadline' field
-    3. Add missing 'priority' field
-    4. Add missing 'is_expired' field
+    Add item_price to old requests that don't have it.
+    
+    Strategy:
+    - If reward exists and < 50: set item_price = reward * 5
+    - If reward exists and >= 50: set item_price = reward * 3
+    - If no reward: set item_price = 100.0 (default)
     """
     requests_ref = db.collection('requests')
     
     updated_count = 0
-    error_count = 0
+    skipped_count = 0
     
-    print("Starting migration...")
+    print("Starting item_price migration...")
     print("-" * 50)
     
     for doc in requests_ref.stream():
         try:
             request_data = doc.to_dict()
             request_id = doc.id
-            needs_update = False
-            update_data = {}
             
-            # 1. Fix 'item' field (string -> list)
-            item = request_data.get('item')
-            if isinstance(item, str):
-                print(f"✓ Request {request_id}: Converting item '{item}' to list")
-                update_data['item'] = [item]
-                needs_update = True
-            elif item is None:
-                print(f"✓ Request {request_id}: Adding empty item list")
-                update_data['item'] = []
-                needs_update = True
+            # Skip if item_price already exists
+            if 'item_price' in request_data:
+                skipped_count += 1
+                continue
             
-            # 2. Add missing 'deadline' field
-            if 'deadline' not in request_data:
-                # Set deadline to time_requested + 24 hours
-                time_requested = request_data.get('time_requested')
-                if time_requested:
-                    if hasattr(time_requested, 'tzinfo') and time_requested.tzinfo is None:
-                        time_requested = time_requested.replace(tzinfo=timezone.utc)
-                    deadline = time_requested + timedelta(hours=24)
-                else:
-                    # Fallback: created_at + 24 hours
-                    created_at = request_data.get('created_at', datetime.now(timezone.utc))
-                    if hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-                        created_at = created_at.replace(tzinfo=timezone.utc)
-                    deadline = created_at + timedelta(hours=24)
-                
-                print(f"✓ Request {request_id}: Adding deadline {deadline}")
-                update_data['deadline'] = deadline
-                needs_update = True
+            # Calculate item_price based on reward
+            reward = request_data.get('reward', 0)
             
-            # 3. Add missing 'priority' field
-            if 'priority' not in request_data:
-                print(f"✓ Request {request_id}: Adding priority=False")
-                update_data['priority'] = False
-                needs_update = True
+            if reward < 50:
+                # Small reward -> estimate item_price as 5x reward
+                item_price = reward * 5
+            elif reward >= 50:
+                # Large reward -> estimate item_price as 3x reward
+                item_price = reward * 3
+            else:
+                # No reward -> default
+                item_price = 100.0
             
-            # 4. Add missing 'is_expired' field
-            if 'is_expired' not in request_data:
-                print(f"✓ Request {request_id}: Adding is_expired=False")
-                update_data['is_expired'] = False
-                needs_update = True
+            # Ensure minimum item_price
+            if item_price < 10:
+                item_price = 50.0
             
-            # Update the document if needed
-            if needs_update:
-                doc.reference.update(update_data)
-                updated_count += 1
-                print(f"✅ Updated request {request_id}")
-                print()
+            print(f"✓ Request {request_id[:8]}... reward={reward} -> item_price={item_price}")
+            
+            # Update document
+            doc.reference.update({'item_price': item_price})
+            updated_count += 1
             
         except Exception as e:
-            error_count += 1
-            print(f"❌ Error updating request {doc.id}: {str(e)}")
-            print()
+            print(f"✗ Error updating request {doc.id}: {str(e)}")
     
     print("-" * 50)
     print(f"Migration complete!")
     print(f"✅ Updated: {updated_count} requests")
-    print(f"❌ Errors: {error_count} requests")
-    print(f"Total processed: {updated_count + error_count} requests")
+    print(f"⏭️  Skipped: {skipped_count} requests (already had item_price)")
 
 def verify_migration():
-    """
-    Verify all requests have correct schema
-    """
+    """Verify all requests have item_price"""
     print("\nVerifying migration...")
     print("-" * 50)
     
     requests_ref = db.collection('requests')
     
     total = 0
-    valid = 0
-    issues = []
+    with_price = 0
+    missing_price = []
     
     for doc in requests_ref.stream():
         total += 1
         request_data = doc.to_dict()
-        request_id = doc.id
         
-        has_issue = False
-        
-        # Check item is list
-        item = request_data.get('item')
-        if not isinstance(item, list):
-            issues.append(f"❌ {request_id}: item is not a list ({type(item).__name__})")
-            has_issue = True
-        
-        # Check deadline exists
-        if 'deadline' not in request_data:
-            issues.append(f"❌ {request_id}: missing deadline")
-            has_issue = True
-        
-        # Check priority exists
-        if 'priority' not in request_data:
-            issues.append(f"❌ {request_id}: missing priority")
-            has_issue = True
-        
-        # Check is_expired exists
-        if 'is_expired' not in request_data:
-            issues.append(f"❌ {request_id}: missing is_expired")
-            has_issue = True
-        
-        if not has_issue:
-            valid += 1
+        if 'item_price' in request_data:
+            with_price += 1
+        else:
+            missing_price.append(doc.id)
     
     print(f"Total requests: {total}")
-    print(f"✅ Valid: {valid}")
-    print(f"❌ Issues: {len(issues)}")
+    print(f"✅ With item_price: {with_price}")
+    print(f"✗ Missing item_price: {len(missing_price)}")
     
-    if issues:
-        print("\nIssues found:")
-        for issue in issues:
-            print(issue)
+    if missing_price:
+        print("\nRequests still missing item_price:")
+        for req_id in missing_price:
+            print(f"  - {req_id}")
     else:
-        print("\n🎉 All requests have correct schema!")
+        print("\n🎉 All requests have item_price!")
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("REQUEST SCHEMA MIGRATION")
+    print("ITEM PRICE MIGRATION")
     print("=" * 50)
     print()
     
     # Run migration
-    migrate_requests()
+    migrate_item_price()
     
     # Verify results
     verify_migration()
     
     print()
     print("=" * 50)
-    print("Migration script completed!")
+    print("Migration completed!")
     print("=" * 50)

@@ -1,6 +1,6 @@
 """
 Area Management and Filtering System with Device-based Counting
-Handles predefined areas, user preferences, and device-aware area-based filtering
+FIXED: Now uses GPS-detected areas (current_area) instead of preferred_areas
 """
 
 from typing import List, Optional, Dict
@@ -133,48 +133,70 @@ async def get_reachable_users_count(
     count_by_device: bool = True
 ) -> int:
     """
-    Get count of reachable users, optionally filtered by area
+    Get count of reachable users, optionally filtered by GPS-detected area
     
-    Changes:
-    - Now supports device-based counting to avoid double-counting
-    - If count_by_device=True, counts unique devices instead of users
-    - Falls back to UID counting for users without device_id
+    FIXED: Now uses current_area (GPS-detected) instead of preferred_areas
+    
+    A user is "reachable" if:
+    1. is_connected = True (has internet)
+    2. location_permission_granted = True (app can track location)
+    3. Has a current_area set (GPS location was processed)
     
     Args:
-        area: Optional area filter
+        area: Optional area filter (uses GPS-detected area)
         count_by_device: If True, count unique devices; if False, count users
         
     Returns:
         int: Count of reachable users or unique devices
     """
     users_ref = db.collection('users')
-    query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
+    query = users_ref.where(filter=firestore.FieldFilter('is_connected', '==', True))
     
     if not count_by_device:
         # Original logic: count all users
-        if not area:
-            return len(list(query.stream()))
-        
-        # Filter by preferred areas
         count = 0
         for user_doc in query.stream():
             user_data = user_doc.to_dict()
-            preferred_areas = user_data.get('preferred_areas', [])
-            if area in preferred_areas:
-                count += 1
+            
+            # Check location permission
+            if not user_data.get('location_permission_granted', False):
+                continue
+            
+            # Get GPS-detected area
+            current_area = user_data.get('current_area')
+            
+            # Skip if no area or "_nearby" area
+            if not current_area or current_area.endswith('_nearby'):
+                continue
+            
+            # Filter by area if specified
+            if area and current_area != area:
+                continue
+            
+            count += 1
+        
         return count
     
-    # NEW: Device-based counting
+    # Device-based counting
     unique_identifiers = set()
     
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
         
+        # Check location permission
+        if not user_data.get('location_permission_granted', False):
+            continue
+        
+        # Get GPS-detected area
+        current_area = user_data.get('current_area')
+        
+        # Skip if no area or "_nearby" area
+        if not current_area or current_area.endswith('_nearby'):
+            continue
+        
         # Filter by area if specified
-        if area:
-            preferred_areas = user_data.get('preferred_areas', [])
-            if area not in preferred_areas:
-                continue
+        if area and current_area != area:
+            continue
         
         # Use device_id if available, otherwise fallback to uid
         identifier = user_data.get('device_id') or user_data.get('uid')
@@ -186,11 +208,14 @@ async def get_reachable_users_count(
 
 async def get_reachable_users_by_area(count_by_device: bool = True) -> Dict[str, int]:
     """
-    Get count of reachable users grouped by area with device-aware counting
+    Get count of reachable users grouped by their GPS-detected area
     
-    Changes:
-    - Now supports device-based counting per area
-    - Prevents double-counting across all areas
+    FIXED: Now uses current_area (GPS-detected) instead of preferred_areas
+    
+    A user is "reachable" if:
+    1. is_connected = True (has internet)
+    2. location_permission_granted = True (app can track location)
+    3. Has a current_area set (GPS location was processed)
     
     Args:
         count_by_device: If True, count unique devices per area
@@ -199,38 +224,58 @@ async def get_reachable_users_by_area(count_by_device: bool = True) -> Dict[str,
         dict: Area name -> count mapping
     """
     users_ref = db.collection('users')
-    query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
+    
+    # Query for reachable users with connectivity
+    query_connected = users_ref.where(filter=firestore.FieldFilter('is_connected', '==', True))
     
     if count_by_device:
-        # NEW: Device-based counting per area
+        # Device-based counting per area
         area_device_sets = {area: set() for area in PREDEFINED_AREAS}
         
-        for user_doc in query.stream():
+        for user_doc in query_connected.stream():
             user_data = user_doc.to_dict()
-            preferred_areas = user_data.get('preferred_areas', [])
+            
+            # Check all reachability conditions
+            if not user_data.get('location_permission_granted', False):
+                continue
+            
+            # Get GPS-detected area (current_area)
+            current_area = user_data.get('current_area')
+            
+            # Skip if no area detected or area ends with "_nearby"
+            if not current_area or current_area.endswith('_nearby'):
+                continue
             
             # Get unique identifier (device_id or uid)
             identifier = user_data.get('device_id') or user_data.get('uid')
             
-            if identifier:
-                for area in preferred_areas:
-                    if area in area_device_sets:
-                        area_device_sets[area].add(identifier)
+            if identifier and current_area in area_device_sets:
+                area_device_sets[current_area].add(identifier)
         
         return {area: len(devices) for area, devices in area_device_sets.items()}
     
-    # Original logic: user-based counting
-    area_counts = {area: 0 for area in PREDEFINED_AREAS}
-    
-    for user_doc in query.stream():
-        user_data = user_doc.to_dict()
-        preferred_areas = user_data.get('preferred_areas', [])
+    else:
+        # User-based counting per area
+        area_counts = {area: 0 for area in PREDEFINED_AREAS}
         
-        for area in preferred_areas:
-            if area in area_counts:
-                area_counts[area] += 1
-    
-    return area_counts
+        for user_doc in query_connected.stream():
+            user_data = user_doc.to_dict()
+            
+            # Check all reachability conditions
+            if not user_data.get('location_permission_granted', False):
+                continue
+            
+            # Get GPS-detected area
+            current_area = user_data.get('current_area')
+            
+            # Skip if no area detected or area ends with "_nearby"
+            if not current_area or current_area.endswith('_nearby'):
+                continue
+            
+            if current_area in area_counts:
+                area_counts[current_area] += 1
+        
+        return area_counts
 
 
 async def get_available_users(
@@ -240,30 +285,42 @@ async def get_available_users(
     """
     Get list of available (reachable) users with optional filters
     
-    Note: This returns full user info, so device_id is included
+    UPDATED: Uses GPS-detected current_area for filtering
     
     Args:
-        area: Filter by specific area
+        area: Filter by specific GPS-detected area
         preferred_areas_only: Only return users with preferred areas set
         
     Returns:
         List[dict]: List of available users with device info
     """
     users_ref = db.collection('users')
-    query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
+    query = users_ref.where(filter=firestore.FieldFilter('is_connected', '==', True))
     
     available_users = []
     
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
+        
+        # Check location permission
+        if not user_data.get('location_permission_granted', False):
+            continue
+        
+        # Get GPS-detected area
+        current_area = user_data.get('current_area')
+        
+        # Skip if no area or "_nearby" area
+        if not current_area or current_area.endswith('_nearby'):
+            continue
+        
         preferred_areas = user_data.get('preferred_areas', [])
         
         # Filter by preferred areas if required
         if preferred_areas_only and not preferred_areas:
             continue
         
-        # Filter by specific area if provided
-        if area and area not in preferred_areas:
+        # Filter by specific area if provided (using GPS-detected area)
+        if area and current_area != area:
             continue
         
         # Include device info in response
@@ -272,9 +329,9 @@ async def get_available_users(
             'email': user_data.get('email'),
             'name': user_data.get('name'),
             'preferred_areas': preferred_areas,
-            'current_area': user_data.get('current_area'),
-            'device_id': user_data.get('device_id'),  # NEW
-            'device_info': user_data.get('device_info')  # NEW
+            'current_area': current_area,
+            'device_id': user_data.get('device_id'),
+            'device_info': user_data.get('device_info')
         })
     
     return available_users
@@ -327,7 +384,9 @@ async def get_requests_by_area(
 
 async def get_nearby_requests(user_uid: str) -> List[Dict]:
     """
-    Get requests near user's current or preferred areas
+    Get requests near user's GPS-detected area
+    
+    UPDATED: Uses GPS-detected current_area instead of preferred_areas
     
     Args:
         user_uid: User UID
@@ -335,7 +394,7 @@ async def get_nearby_requests(user_uid: str) -> List[Dict]:
     Returns:
         List[dict]: Nearby open requests
     """
-    # Get user's areas
+    # Get user's GPS-detected area
     user_ref = db.collection('users').document(user_uid)
     user_doc = user_ref.get()
     
@@ -343,12 +402,12 @@ async def get_nearby_requests(user_uid: str) -> List[Dict]:
         return []
     
     user_data = user_doc.to_dict()
-    preferred_areas = user_data.get('preferred_areas', [])
     current_area = user_data.get('current_area')
+    preferred_areas = user_data.get('preferred_areas', [])
     
-    # Combine current and preferred areas
+    # Combine current GPS area and preferred areas
     user_areas = set(preferred_areas)
-    if current_area:
+    if current_area and not current_area.endswith('_nearby'):
         user_areas.add(current_area)
     
     if not user_areas:
@@ -381,13 +440,15 @@ async def get_nearby_requests(user_uid: str) -> List[Dict]:
 
 async def get_area_device_analytics() -> Dict:
     """
-    Get analytics about device distribution across areas
+    Get analytics about device distribution across GPS-detected areas
+    
+    UPDATED: Uses current_area (GPS-detected) instead of preferred_areas
     
     Returns:
         dict: Device analytics per area
     """
     users_ref = db.collection('users')
-    query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
+    query = users_ref.where(filter=firestore.FieldFilter('is_connected', '==', True))
     
     area_analytics = {area: {
         'unique_devices': set(),
@@ -397,17 +458,27 @@ async def get_area_device_analytics() -> Dict:
     
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
-        preferred_areas = user_data.get('preferred_areas', [])
+        
+        # Check location permission
+        if not user_data.get('location_permission_granted', False):
+            continue
+        
+        # Get GPS-detected area
+        current_area = user_data.get('current_area')
+        
+        # Skip if no area or "_nearby" area
+        if not current_area or current_area.endswith('_nearby'):
+            continue
+        
         device_id = user_data.get('device_id')
         
-        for area in preferred_areas:
-            if area in area_analytics:
-                area_analytics[area]['total_users'] += 1
-                
-                if device_id:
-                    area_analytics[area]['unique_devices'].add(device_id)
-                else:
-                    area_analytics[area]['users_without_device'] += 1
+        if current_area in area_analytics:
+            area_analytics[current_area]['total_users'] += 1
+            
+            if device_id:
+                area_analytics[current_area]['unique_devices'].add(device_id)
+            else:
+                area_analytics[current_area]['users_without_device'] += 1
     
     # Convert sets to counts
     result = {}
