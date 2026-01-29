@@ -11,6 +11,7 @@ from auth import get_current_user, verify_email_domain
 from scheduler import cleanup_expired_requests_job
 from database import mark_expired_requests
 import asyncio
+from cache_decorator import cache_response
 from datetime import datetime
 
 db = firestore.client()
@@ -103,6 +104,7 @@ app.add_middleware(
 # ============================================
 
 @app.get("/")
+@cache_response(ttl=3600)
 async def root():
     """Health check endpoint"""
     return {
@@ -138,6 +140,7 @@ async def verify_email_endpoint(email: EmailStr):
 # ============================================
 
 @app.get("/auth/me")
+@cache_response(ttl=3600)
 async def get_current_user_endpoint(current_user: dict = Depends(get_current_user)):
     """Get current authenticated user information"""
     return {
@@ -205,6 +208,7 @@ async def update_connectivity_endpoint(
 
 
 @app.get("/user/reachability/status", response_model=ReachabilityStatusResponse)
+@cache_response(ttl=3600)
 async def get_reachability_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -225,6 +229,7 @@ async def get_reachability_endpoint(
 # ============================================
 
 @app.get("/areas/list")
+@cache_response(ttl=3600)
 async def get_areas_list(current_user: dict = Depends(get_current_user)):
     """Get list of all available campus areas"""
     return {
@@ -360,6 +365,7 @@ async def update_gps_location_endpoint(
 
 
 @app.get("/location/my-gps")
+@cache_response(ttl=3600)
 async def get_my_gps_location_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -451,6 +457,7 @@ async def get_nearby_users_endpoint(
 
 
 @app.get("/location/users-in-area/{area_name}")
+@cache_response(ttl=3600)
 async def get_users_in_area_endpoint(
     area_name: str,
     include_edge_users: bool = Query(True, description="Include users on area boundary"),
@@ -477,6 +484,7 @@ async def get_users_in_area_endpoint(
 
 
 @app.get("/location/nearby-requests-gps")
+@cache_response(ttl=3600)
 async def get_nearby_requests_by_gps_endpoint(
     radius_meters: float = Query(5000.0, description="Search radius in meters"),
     current_user: dict = Depends(get_current_user)
@@ -553,6 +561,7 @@ async def get_nearby_requests_by_gps_endpoint(
 
 
 @app.get("/location/check-area/{area_name}")
+@cache_response(ttl=3600)
 async def check_if_in_area_endpoint(
     area_name: str,
     current_user: dict = Depends(get_current_user)
@@ -580,6 +589,7 @@ async def check_if_in_area_endpoint(
 
 
 @app.get("/location/area-info/{area_name}")
+@cache_response(ttl=3600)
 async def get_area_info_endpoint(
     area_name: str,
     current_user: dict = Depends(get_current_user)
@@ -603,6 +613,7 @@ async def get_area_info_endpoint(
 
 
 @app.get("/location/all-areas")
+@cache_response(ttl=3600)
 async def get_all_areas_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -687,6 +698,7 @@ async def bulk_location_update_endpoint(
 
 
 @app.get("/location/performance-test")
+@cache_response(ttl=3600)
 async def location_performance_test(
     current_user: dict = Depends(get_current_user)
 ):
@@ -788,6 +800,7 @@ async def calculate_delivery_distance_endpoint(
 # ============================================
 
 @app.get("/users/reachable-count")
+@cache_response(ttl=3600)
 async def get_reachable_count_endpoint(
     area: Optional[str] = Query(None, description="Filter by specific area"),
     count_by_device: bool = Query(True, description="Count unique devices instead of users"),
@@ -831,6 +844,7 @@ async def get_reachable_count_endpoint(
 
 
 @app.get("/users/reachable-by-area", response_model=AreaCountResponse)
+@cache_response(ttl=3600)
 async def get_reachable_by_area_endpoint(
     count_by_device: bool = Query(True, description="Count unique devices per area"),
     current_user: dict = Depends(get_current_user)
@@ -859,6 +873,7 @@ async def get_reachable_by_area_endpoint(
 
 
 @app.get("/users/available")
+@cache_response(ttl=3600)
 async def get_available_users_endpoint(
     area: Optional[str] = Query(None, description="Filter by specific area"),
     preferred_areas: bool = Query(False, description="Only users with preferred areas"),
@@ -883,6 +898,7 @@ async def get_available_users_endpoint(
 # ============================================
 
 @app.get("/users/unique-devices")
+@cache_response(ttl=3600)
 async def get_unique_devices_endpoint(
     area: Optional[str] = Query(None, description="Filter by specific area"),
     current_user: dict = Depends(get_current_user)
@@ -910,6 +926,7 @@ async def get_unique_devices_endpoint(
 
 
 @app.get("/analytics/device-distribution")
+@cache_response(ttl=3600)
 async def get_device_distribution_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -949,6 +966,7 @@ async def get_device_distribution_endpoint(
 
 
 @app.get("/analytics/device-info")
+@cache_response(ttl=3600)
 async def get_device_analytics_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1033,6 +1051,7 @@ async def cleanup_expired_requests(
 
 
 @app.get("/request/all", response_model=List[RequestResponse])
+@cache_response(ttl=3600)
 async def get_all_requests_endpoint(
     status: Optional[RequestStatus] = Query(None, description="Filter by status"),
     pickup_area: Optional[str] = Query(None, description="Filter by pickup area"),
@@ -1067,6 +1086,7 @@ async def get_all_requests_endpoint(
 
 
 @app.get("/request/nearby", response_model=List[RequestResponse])
+@cache_response(ttl=3600)
 async def get_nearby_requests_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1084,6 +1104,7 @@ async def get_nearby_requests_endpoint(
 
 
 @app.get("/request/mine", response_model=List[RequestResponse])
+@cache_response(ttl=3600)
 async def get_my_requests_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1096,6 +1117,7 @@ async def get_my_requests_endpoint(
 
 
 @app.get("/request/accepted", response_model=List[RequestResponse])
+@cache_response(ttl=3600)
 async def get_my_accepted_requests_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1108,6 +1130,7 @@ async def get_my_accepted_requests_endpoint(
 
 
 @app.get("/request/status/{request_id}", response_model=RequestResponse)
+@cache_response(ttl=3600)
 async def get_request_status_endpoint(
     request_id: str,
     current_user: dict = Depends(get_current_user)
@@ -1242,6 +1265,7 @@ async def unregister_fcm_token_endpoint(
 # ============================================
 
 @app.get("/user/profile")
+@cache_response(ttl=3600)
 async def get_user_profile_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1281,6 +1305,7 @@ async def update_user_profile_endpoint(
 
 
 @app.get("/user/stats", response_model=RequestStatsResponse)
+@cache_response(ttl=3600)
 async def get_user_stats_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1356,6 +1381,7 @@ async def update_rating_endpoint(
 
 
 @app.get("/rating/deliverer/{user_uid}", response_model=UserRatingsResponse)
+@cache_response(ttl=3600)
 async def get_deliverer_ratings_endpoint(
     user_uid: str,
     current_user: dict = Depends(get_current_user)
@@ -1374,6 +1400,7 @@ async def get_deliverer_ratings_endpoint(
 
 
 @app.get("/rating/my-deliverer-ratings", response_model=UserRatingsResponse)
+@cache_response(ttl=3600)
 async def get_my_deliverer_ratings_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1390,6 +1417,7 @@ async def get_my_deliverer_ratings_endpoint(
 
 
 @app.get("/rating/my-given-ratings", response_model=RatingsGivenResponse)
+@cache_response(ttl=3600)
 async def get_my_given_ratings_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1409,6 +1437,7 @@ async def get_my_given_ratings_endpoint(
 
 
 @app.get("/rating/request/{request_id}")
+@cache_response(ttl=3600)
 async def get_request_rating_endpoint(
     request_id: str,
     current_user: dict = Depends(get_current_user)
@@ -1436,6 +1465,7 @@ async def get_request_rating_endpoint(
 
 
 @app.get("/rating/can-rate/{request_id}", response_model=CanRateResponse)
+@cache_response(ttl=3600)
 async def can_rate_request_endpoint(
     request_id: str,
     current_user: dict = Depends(get_current_user)
@@ -1457,6 +1487,7 @@ async def can_rate_request_endpoint(
 
 
 @app.get("/rating/summary/{user_uid}", response_model=RatingStatsResponse)
+@cache_response(ttl=3600)
 async def get_deliverer_rating_summary_endpoint(
     user_uid: str,
     current_user: dict = Depends(get_current_user)
@@ -1479,6 +1510,7 @@ async def get_deliverer_rating_summary_endpoint(
 
 
 @app.get("/rating/my-summary", response_model=RatingStatsResponse)
+@cache_response(ttl=3600)
 async def get_my_rating_summary_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1520,6 +1552,7 @@ async def delete_rating_endpoint(
 # ============================================
 
 @app.get("/dashboard/enhanced")
+@cache_response(ttl=3600)
 async def enhanced_dashboard_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1575,6 +1608,7 @@ async def enhanced_dashboard_endpoint(
 
 
 @app.get("/dashboard")
+@cache_response(ttl=3600)
 async def dashboard_endpoint(current_user: dict = Depends(get_current_user)):
     """
     Basic dashboard - user statistics and recent activity
@@ -1603,6 +1637,7 @@ async def dashboard_endpoint(current_user: dict = Depends(get_current_user)):
 # ============================================
 
 @app.get("/admin/connectivity-stats", response_model=ConnectivityStatsResponse)
+@cache_response(ttl=3600)
 async def get_connectivity_stats_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
@@ -1628,6 +1663,7 @@ async def get_connectivity_stats_endpoint(
 # ============================================
 
 @app.get("/debug/device-count-comparison")
+@cache_response(ttl=3600)
 async def device_count_comparison_endpoint(
     area: Optional[str] = Query(None, description="Optional area filter"),
     current_user: dict = Depends(get_current_user)
