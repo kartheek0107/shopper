@@ -21,7 +21,7 @@ class UpdateConnectivityModel(BaseModel):
     is_connected: bool = Field(..., description="Internet connectivity status")
     location_permission_granted: bool = Field(..., description="Location permission status")
     device_id: Optional[str] = Field(
-        None, 
+        None,
         description="Unique device identifier (Android ID, IDFV, or app-generated UUID)",
         min_length=1,
         max_length=255
@@ -46,7 +46,7 @@ class UpdateConnectivityModel(BaseModel):
 class SetPreferredAreasModel(BaseModel):
     """Model for setting preferred areas"""
     preferred_areas: List[str] = Field(
-        ..., 
+        ...,
         min_length=1,
         description="List of preferred operating areas"
     )
@@ -69,25 +69,25 @@ class UserProfileResponse(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     email_verified: bool
-    
+
     # Area preferences
     preferred_areas: Optional[List[str]] = []
     current_area: Optional[str] = None
-    
+
     # Connectivity & Reachability
     is_reachable: bool = False
     is_connected: bool = False
     location_permission_granted: bool = False
     last_connectivity_check: Optional[datetime] = None
-    
+
     # Device tracking (NEW)
     device_id: Optional[str] = None
     device_info: Optional[dict] = None
     device_registered_at: Optional[datetime] = None
-    
+
     # FCM
     fcm_token: Optional[str] = None
-    
+
     # Timestamps
     created_at: datetime
     last_login: datetime
@@ -100,21 +100,28 @@ class UpdateProfileModel(BaseModel):
 
 
 # ============================================
-# REQUEST MODELS
+# REQUEST MODELS (UPDATED - AUTO-FETCH FROM PROFILE)
 # ============================================
 
 class CreateRequestModel(BaseModel):
-    """Model for creating a new request with area support"""
+    """
+    Model for creating a new request with area support
+
+    UPDATED: poster_name and poster_phone are AUTO-FETCHED from user profile
+    No need to provide them in the request body!
+    """
     item: List[str] = Field(..., min_length=1, max_length=200)
     pickup_location: str = Field(..., min_length=1, max_length=500)
     pickup_area: str = Field(..., description="Pickup area")
     drop_location: str = Field(..., min_length=1, max_length=500)
     drop_area: str = Field(..., description="Drop area")
-    
+
+    # NO poster_name or poster_phone here - fetched automatically!
+
     reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
     item_price: float = Field(..., gt=0, description="Total item price (must be positive)")
     time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
-    
+
     notes: Optional[str] = Field(None, max_length=1000, description="Additional notes")
     deadline: datetime = Field(..., description="Deadline for request completion")
     priority: bool = Field(default=False, description="Whether the request is high priority")
@@ -130,45 +137,48 @@ class CreateRequestModel(BaseModel):
             if len(item) > 200:
                 raise ValueError('Each item must be less than 200 characters')
         return v
-    
+
     @field_validator('reward')
     @classmethod
     def validate_reward(cls, v):
         if v is not None and v <= 0:
             raise ValueError('reward must be positive if provided')
         return v
-    
+
     @field_validator('time_requested')
     @classmethod
     def time_must_be_future(cls, v):
         if v is None:
             return v
-        
+
         now = datetime.now(timezone.utc)
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
         if v <= now:
             raise ValueError('time_requested must be in the future')
         return v
-    
+
     @field_validator('deadline')
     @classmethod
     def deadline_must_be_future(cls, v):
         now = datetime.now(timezone.utc)
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
-        
+
         if v <= now:
             raise ValueError('deadline must be in the future')
-        
+
         return v
 
 
 class RequestResponse(BaseModel):
-    """Model for request response with area fields"""
+    """Model for request response with area fields and poster/acceptor details"""
     request_id: str
     posted_by: str
     poster_email: str
+    poster_name: str  # Auto-fetched from profile
+    poster_phone: str  # Auto-fetched from profile
+
     item: List[str]
     pickup_location: str
     pickup_area: Optional[str] = None
@@ -177,20 +187,30 @@ class RequestResponse(BaseModel):
     time_requested: Optional[datetime] = None
     item_price: Optional[float] = None
     reward: float
-    reward_auto_calculated: bool = False
+    reward_auto_calculated: bool = True
     status: RequestStatus
+
     accepted_by: Optional[str] = None
     acceptor_email: Optional[str] = None
+    acceptor_name: Optional[str] = None  # Auto-fetched from profile
+    acceptor_phone: Optional[str] = None  # Auto-fetched from profile
+
     created_at: datetime
     notes: Optional[str] = None
     deadline: datetime
-    priority: bool 
+    priority: bool
     is_expired: bool = False
 
 
 class AcceptRequestModel(BaseModel):
-    """Model for accepting a request"""
+    """
+    Model for accepting a request
+
+    UPDATED: acceptor_name and acceptor_phone are AUTO-FETCHED from user profile
+    No need to provide them in the request body!
+    """
     request_id: str
+    # NO acceptor_name or acceptor_phone here - fetched automatically!
 
 
 class UpdateRequestStatusModel(BaseModel):
@@ -232,7 +252,7 @@ class ReachabilityStatusResponse(BaseModel):
     location_permission_granted: bool
     last_connectivity_check: Optional[datetime]
     message: str
-    device_id: Optional[str] = None  # NEW: Include device_id in response
+    device_id: Optional[str] = None
 
 
 class AreaCountResponse(BaseModel):
@@ -247,8 +267,8 @@ class ConnectivityStatsResponse(BaseModel):
     connected_users: int
     location_granted_users: int
     reachable_percentage: float
-    unique_devices: int = Field(0, description="Number of unique devices")  # NEW
-    multi_device_users: int = Field(0, description="Users with multiple devices")  # NEW
+    unique_devices: int = Field(0, description="Number of unique devices")
+    multi_device_users: int = Field(0, description="Users with multiple devices")
 
 
 class EnhancedDashboardResponse(BaseModel):
