@@ -61,40 +61,58 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
     request_document = {
         "request_id": request_id,
         "posted_by": user_uid,
+        "postedBy": user_uid,  # camelCase version
         "poster_email": user_email,
+        "posterEmail": user_email,  # camelCase version
         "poster_name": poster_name,
+        "posterName": poster_name,  # camelCase version
         "poster_phone": poster_phone,
+        "posterPhone": poster_phone,  # camelCase version
 
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
+        "pickupLocation": request_data["pickup_location"],  # camelCase version
         "pickup_area": request_data.get("pickup_area"),
+        "pickupArea": request_data.get("pickup_area"),  # camelCase version
         "drop_location": request_data["drop_location"],
+        "dropLocation": request_data["drop_location"],  # camelCase version
         "drop_area": request_data.get("drop_area"),
+        "dropArea": request_data.get("drop_area"),  # camelCase version
 
         # Item price (required)
         "item_price": request_data.get("item_price"),
+        "itemPrice": request_data.get("item_price"),  # camelCase version
 
         # Reward (auto-calculated or user-provided)
         "reward": reward,
         "reward_auto_calculated": reward_auto_calculated,
+        "rewardAutoCalculated": reward_auto_calculated,  # camelCase version
 
         # Time requested (now optional)
         "time_requested": request_data.get("time_requested"),
+        "timeRequested": request_data.get("time_requested"),  # camelCase version
 
         "status": "open",
         "accepted_by": None,
+        "acceptedBy": None,  # camelCase version
         "acceptor_email": None,
+        "acceptorEmail": None,  # camelCase version
 
         # Timestamps
         "created_at": now,
+        "createdAt": now,  # camelCase version
         "updated_at": now,
+        "updatedAt": now,  # camelCase version
         "accepted_at": None,
+        "acceptedAt": None,  # camelCase version
         "completed_at": None,
+        "completedAt": None,  # camelCase version
 
         "notes": request_data.get("notes"),
         "deadline": request_data.get("deadline"),
         "priority": request_data.get("priority", False),
         "is_expired": False,
+        "isExpired": False,  # camelCase version
     }
 
     db.collection('requests').document(request_id).set(request_document)
@@ -167,37 +185,58 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
     request_document = {
         "request_id": request_id,
         "posted_by": user_uid,
+        "postedBy": user_uid,  # camelCase
         "poster_email": user_email,
+        "posterEmail": user_email,  # camelCase
         "poster_name": poster_name,
+        "posterName": poster_name,  # camelCase
         "poster_phone": poster_phone,
+        "posterPhone": poster_phone,  # camelCase
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
+        "pickupLocation": request_data["pickup_location"],  # camelCase
         "pickup_area": pickup_area,
+        "pickupArea": pickup_area,  # camelCase
         "pickup_gps": request_data.get("pickup_gps"),
+        "pickupGps": request_data.get("pickup_gps"),  # camelCase
         "drop_location": request_data["drop_location"],
+        "dropLocation": request_data["drop_location"],  # camelCase
         "drop_area": drop_area,
+        "dropArea": drop_area,  # camelCase
         "drop_gps": request_data.get("drop_gps"),
+        "dropGps": request_data.get("drop_gps"),  # camelCase
         "delivery_distance_km": delivery_distance,
+        "deliveryDistanceKm": delivery_distance,  # camelCase
 
         # Time requested (now optional)
         "time_requested": request_data.get("time_requested"),
+        "timeRequested": request_data.get("time_requested"),  # camelCase
 
         # Item price and reward
         "item_price": item_price,
+        "itemPrice": item_price,  # camelCase
         "reward": reward,
         "reward_auto_calculated": reward_auto_calculated,
+        "rewardAutoCalculated": reward_auto_calculated,  # camelCase
 
         "status": "open",
         "accepted_by": None,
+        "acceptedBy": None,  # camelCase
         "acceptor_email": None,
+        "acceptorEmail": None,  # camelCase
         "created_at": datetime.now(timezone.utc),
+        "createdAt": datetime.now(timezone.utc),  # camelCase
         "accepted_at": None,
+        "acceptedAt": None,  # camelCase
         "completed_at": None,
+        "completedAt": None,  # camelCase
         "updated_at": datetime.now(timezone.utc),
+        "updatedAt": datetime.now(timezone.utc),  # camelCase
         "notes": request_data.get("notes"),
         "deadline": request_data.get("deadline"),
         "priority": request_data.get("priority", False),
         "is_expired": False,
+        "isExpired": False,  # camelCase
     }
 
     # Store in Firestore
@@ -255,27 +294,40 @@ def enrich_request_with_poster_info(request_data: dict) -> dict:
         request_data: Request data dict
 
     Returns:
-        dict: Request data enriched with poster_name and poster_phone
+        dict: Request data enriched with posterName and posterPhone (camelCase)
     """
-    # If already has poster info, return as is
-    if 'poster_name' in request_data and 'poster_phone' in request_data:
+    # Check both snake_case and camelCase
+    has_snake_case = 'poster_name' in request_data and 'poster_phone' in request_data
+    has_camel_case = 'posterName' in request_data and 'posterPhone' in request_data
+
+    if has_snake_case or has_camel_case:
+        # If has snake_case but not camelCase, convert
+        if has_snake_case and not has_camel_case:
+            request_data['posterName'] = request_data.get('poster_name', 'Unknown')
+            request_data['posterPhone'] = request_data.get('poster_phone', 'N/A')
         return request_data
 
     # Get poster information
-    poster_uid = request_data.get('posted_by')
+    poster_uid = request_data.get('posted_by') or request_data.get('postedBy')
     if poster_uid:
         user_ref = db.collection('users').document(poster_uid)
         user_doc = user_ref.get()
         if user_doc.exists:
             user_data = user_doc.to_dict()
-            request_data['poster_name'] = user_data.get('name', 'Unknown')
-            request_data['poster_phone'] = user_data.get('phone', 'N/A')
+            poster_name = user_data.get('name', 'Unknown')
+            poster_phone = user_data.get('phone', 'N/A')
         else:
-            request_data['poster_name'] = 'Unknown'
-            request_data['poster_phone'] = 'N/A'
+            poster_name = 'Unknown'
+            poster_phone = 'N/A'
     else:
-        request_data['poster_name'] = 'Unknown'
-        request_data['poster_phone'] = 'N/A'
+        poster_name = 'Unknown'
+        poster_phone = 'N/A'
+
+    # Set both formats to ensure compatibility
+    request_data['poster_name'] = poster_name
+    request_data['poster_phone'] = poster_phone
+    request_data['posterName'] = poster_name
+    request_data['posterPhone'] = poster_phone
 
     return request_data
 
