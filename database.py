@@ -18,13 +18,13 @@ db = firestore.client()
 async def create_request(user_uid: str, user_email: str, request_data: dict) -> dict:
     """
     Create a new request in Firestore with auto-calculated reward support.
-    
+
     Changes:
     - reward is now OPTIONAL - auto-calculated if not provided
     - time_requested is now OPTIONAL - no longer required
     - Adds reward_auto_calculated field to track calculation source
     """
-    
+
     # Validate required field: item_price
     if "item_price" not in request_data:
         raise HTTPException(status_code=400, detail="item_price is required for every request")
@@ -33,7 +33,7 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
     now = datetime.now(timezone.utc)
 
     item_price = request_data["item_price"]
-    
+
     # AUTO-CALCULATE REWARD if not provided
     if "reward" not in request_data or request_data["reward"] is None:
         reward = calculate_reward(
@@ -60,7 +60,7 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
 
         # Item price (required)
         "item_price": request_data.get("item_price"),
-        
+
         # Reward (auto-calculated or user-provided)
         "reward": reward,
         "reward_auto_calculated": reward_auto_calculated,
@@ -94,27 +94,27 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
     Auto-detect areas if GPS provided but areas not specified
     """
     request_id = str(uuid.uuid4())
-    
+
     # Auto-detect areas from GPS if not provided
     pickup_area = request_data.get("pickup_area")
     drop_area = request_data.get("drop_area")
-    
+
     if not pickup_area and request_data.get("pickup_gps"):
         from location_service import detect_area_from_coordinates
         pickup_gps = request_data["pickup_gps"]
         pickup_area = detect_area_from_coordinates(
-            pickup_gps["latitude"], 
+            pickup_gps["latitude"],
             pickup_gps["longitude"]
         )
-    
+
     if not drop_area and request_data.get("drop_gps"):
         from location_service import detect_area_from_coordinates
         drop_gps = request_data["drop_gps"]
         drop_area = detect_area_from_coordinates(
-            drop_gps["latitude"], 
+            drop_gps["latitude"],
             drop_gps["longitude"]
         )
-    
+
     # Calculate delivery distance if both GPS coordinates provided
     delivery_distance = None
     if request_data.get("pickup_gps") and request_data.get("drop_gps"):
@@ -125,7 +125,7 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
             pickup_gps["latitude"], pickup_gps["longitude"],
             drop_gps["latitude"], drop_gps["longitude"]
         )
-    
+
     # AUTO-CALCULATE REWARD if not provided (AFTER area detection)
     item_price = request_data["item_price"]
     if "reward" not in request_data or request_data["reward"] is None:
@@ -139,7 +139,7 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
     else:
         reward = request_data["reward"]
         reward_auto_calculated = False
-    
+
     request_document = {
         "request_id": request_id,
         "posted_by": user_uid,
@@ -152,15 +152,15 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
         "drop_area": drop_area,
         "drop_gps": request_data.get("drop_gps"),
         "delivery_distance_km": delivery_distance,
-        
+
         # Time requested (now optional)
         "time_requested": request_data.get("time_requested"),
-        
+
         # Item price and reward
         "item_price": item_price,
         "reward": reward,
         "reward_auto_calculated": reward_auto_calculated,
-        
+
         "status": "open",
         "accepted_by": None,
         "acceptor_email": None,
@@ -173,41 +173,41 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
         "priority": request_data.get("priority", False),
         "is_expired": False,
     }
-    
+
     # Store in Firestore
     db.collection('requests').document(request_id).set(request_document)
-    
+
     return request_document
 
 
 async def mark_expired_requests() -> int:
     """
     Marks requests as expired if deadline passed and not completed.
-    
+
     Returns:
         int: Number of requests marked as expired
     """
-    requests_ref = db.collection('requests')  
-    
+    requests_ref = db.collection('requests')
+
     # Get all open/accepted requests
     query = requests_ref.where(
         filter=firestore.FieldFilter('status', 'in', ['open', 'accepted'])
     ).where(
         filter=firestore.FieldFilter('is_expired', '==', False)
     )
-    
+
     now = datetime.now(timezone.utc)
     expired_count = 0
-    
+
     for doc in query.stream():
         request_data = doc.to_dict()
         deadline = request_data.get('deadline')
-        
+
         if deadline:
             # Ensure deadline is timezone-aware
             if deadline.tzinfo is None:
                 deadline = deadline.replace(tzinfo=timezone.utc)
-            
+
             if deadline < now:
                 # Mark as expired and cancelled
                 doc.reference.update({
@@ -217,41 +217,41 @@ async def mark_expired_requests() -> int:
                     'cancelled_reason': 'Deadline expired'
                 })
                 expired_count += 1
-    
+
     return expired_count
-    
+
 
 async def get_all_requests(
-    status: Optional[str] = None,
-    pickup_area: Optional[str] = None,
-    drop_area: Optional[str] = None,
-    include_expired: bool = False
+        status: Optional[str] = None,
+        pickup_area: Optional[str] = None,
+        drop_area: Optional[str] = None,
+        include_expired: bool = False
 ) -> List[dict]:
     """
     Get all requests with optional filters
-    
+
     Args:
         status: Optional status filter
         pickup_area: Optional pickup area filter
         drop_area: Optional drop area filter
         include_expired: Whether to include expired requests
-        
+
     Returns:
         List[dict]: List of requests
     """
     requests_ref = db.collection('requests')
-    
+
     # Start with status filter if provided
     if status:
         query = requests_ref.where(filter=firestore.FieldFilter('status', '==', status))
     else:
         query = requests_ref
-    
+
     # Get all matching documents
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
-        
+
         # Apply area filters in memory
         if pickup_area and request_data.get('pickup_area') != pickup_area:
             continue
@@ -259,71 +259,85 @@ async def get_all_requests(
             continue
         if not include_expired and request_data.get('is_expired', False):
             continue
-        
+
         requests.append(request_data)
-    
+
     # Sort by creation time (newest first)
     requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
-    
+
     return requests
 
 
 async def get_user_requests(user_uid: str) -> List[dict]:
     """
     Get all requests posted by a specific user
-    
+
+    ✅ FIXED: Removed .order_by() to avoid Firestore composite index requirement
+    Now sorts in Python instead
+
     Args:
         user_uid: UID of the user
-        
+
     Returns:
         List[dict]: List of user's requests
     """
     requests_ref = db.collection('requests')
     query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid))
-    query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
-    
+    # ❌ REMOVED: query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
+    # This was causing 500 error due to missing Firestore composite index
+
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
         requests.append(request_data)
-    
+
+    # ✅ FIX: Sort in Python instead (no index required)
+    requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
+
     return requests
 
 
 async def get_accepted_requests(user_uid: str) -> List[dict]:
     """
     Get all requests accepted by a specific user
-    
+
+    ✅ FIXED: Removed .order_by() to avoid Firestore composite index requirement
+    Now sorts in Python instead
+
     Args:
         user_uid: UID of the user
-        
+
     Returns:
         List[dict]: List of accepted requests
     """
     requests_ref = db.collection('requests')
     query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid))
-    query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
-    
+    # ❌ REMOVED: query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
+    # This was causing 500 error due to missing Firestore composite index
+
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
         requests.append(request_data)
-    
+
+    # ✅ FIX: Sort in Python instead (no index required)
+    requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
+
     return requests
 
 
 async def get_request_by_id(request_id: str) -> Optional[dict]:
     """
     Get a specific request by ID
-    
+
     Args:
         request_id: Request ID
-        
+
     Returns:
         dict: Request data or None if not found
     """
     doc = db.collection('requests').document(request_id).get()
-    
+
     if doc.exists:
         return doc.to_dict()
     return None
@@ -332,44 +346,44 @@ async def get_request_by_id(request_id: str) -> Optional[dict]:
 async def accept_request(request_id: str, user_uid: str, user_email: str) -> dict:
     """
     Accept a request (atomic operation)
-    
+
     Args:
         request_id: Request ID to accept
         user_uid: UID of the user accepting
         user_email: Email of the user accepting
-        
+
     Returns:
         dict: Updated request data
-        
+
     Raises:
         HTTPException: If request not found, already accepted, or user is the poster
     """
     request_ref = db.collection('requests').document(request_id)
-    
+
     # Use transaction for atomic update
     @firestore.transactional
     def update_in_transaction(transaction):
         snapshot = request_ref.get(transaction=transaction)
-        
+
         if not snapshot.exists:
             raise HTTPException(status_code=404, detail="Request not found")
-        
+
         request_data = snapshot.to_dict()
-        
+
         # Check if already accepted
         if request_data['status'] != 'open':
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Request is already {request_data['status']}"
             )
-        
+
         # Check if user is trying to accept their own request
         if request_data['posted_by'] == user_uid:
             raise HTTPException(
                 status_code=400,
                 detail="You cannot accept your own request"
             )
-        
+
         # Update request
         now = datetime.now(timezone.utc)
         transaction.update(request_ref, {
@@ -379,7 +393,7 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
             'accepted_at': now,
             'updated_at': now
         })
-        
+
         # Return updated data
         request_data.update({
             'status': 'accepted',
@@ -389,51 +403,51 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
             'updated_at': now
         })
         return request_data
-    
+
     # Execute transaction
     transaction = db.transaction()
     updated_request = update_in_transaction(transaction)
-    
+
     return updated_request
 
 
 async def update_request_status(
-    request_id: str, 
-    new_status: str, 
-    user_uid: str
+        request_id: str,
+        new_status: str,
+        user_uid: str
 ) -> dict:
     """
     Update request status (only by poster or acceptor)
-    
+
     Args:
         request_id: Request ID
         new_status: New status (accepted, completed, cancelled)
         user_uid: UID of user making the update
-        
+
     Returns:
         dict: Updated request data
-        
+
     Raises:
         HTTPException: If not authorized or invalid status transition
     """
     request_ref = db.collection('requests').document(request_id)
     doc = request_ref.get()
-    
+
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Request not found")
-    
+
     request_data = doc.to_dict()
-    
+
     # Authorization check
     is_poster = request_data['posted_by'] == user_uid
     is_acceptor = request_data.get('accepted_by') == user_uid
-    
+
     if not (is_poster or is_acceptor):
         raise HTTPException(
             status_code=403,
             detail="Not authorized to update this request"
         )
-    
+
     # Validate status transition
     current_status = request_data['status']
     valid_transitions = {
@@ -442,26 +456,26 @@ async def update_request_status(
         'completed': [],
         'cancelled': []
     }
-    
+
     if new_status not in valid_transitions.get(current_status, []):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot transition from {current_status} to {new_status}"
         )
-    
+
     # Update status
     now = datetime.now(timezone.utc)
     update_data = {
         'status': new_status,
         'updated_at': now
     }
-    
+
     if new_status == 'completed':
         update_data['completed_at'] = now
-    
+
     request_ref.update(update_data)
     request_data.update(update_data)
-    
+
     return request_data
 
 
@@ -472,15 +486,15 @@ async def update_request_status(
 async def get_user_profile(user_uid: str) -> Optional[dict]:
     """
     Get user profile from Firestore
-    
+
     Args:
         user_uid: User UID
-        
+
     Returns:
         dict: User data or None if not found
     """
     user_doc = db.collection('users').document(user_uid).get()
-    
+
     if user_doc.exists:
         return user_doc.to_dict()
     return None
@@ -489,23 +503,23 @@ async def get_user_profile(user_uid: str) -> Optional[dict]:
 async def update_user_profile(user_uid: str, profile_data: dict) -> dict:
     """
     Update user profile
-    
+
     Args:
         user_uid: User UID
         profile_data: Profile fields to update
-        
+
     Returns:
         dict: Updated user data
     """
     user_ref = db.collection('users').document(user_uid)
-    
+
     update_data = {
         **profile_data,
         'updated_at': datetime.now(timezone.utc)
     }
-    
+
     user_ref.update(update_data)
-    
+
     user_doc = user_ref.get()
     return user_doc.to_dict()
 
@@ -513,31 +527,33 @@ async def update_user_profile(user_uid: str, profile_data: dict) -> dict:
 async def get_user_stats(user_uid: str) -> dict:
     """
     Get user statistics (requests posted, accepted, completed)
-    
+
     Args:
         user_uid: User UID
-        
+
     Returns:
         dict: User statistics
     """
     requests_ref = db.collection('requests')
-    
+
     # Count posted requests
     posted_query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid))
     total_posted = len(list(posted_query.stream()))
-    
+
     # Count accepted requests
     accepted_query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid))
     total_accepted = len(list(accepted_query.stream()))
-    
+
     # Count completed requests (as acceptor)
-    completed_query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid)).where(filter=firestore.FieldFilter('status', '==', 'completed'))
+    completed_query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid)).where(
+        filter=firestore.FieldFilter('status', '==', 'completed'))
     total_completed = len(list(completed_query.stream()))
-    
+
     # Count active requests (posted and still open)
-    active_query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid)).where(filter=firestore.FieldFilter('status', '==', 'open'))
+    active_query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid)).where(
+        filter=firestore.FieldFilter('status', '==', 'open'))
     active_requests = len(list(active_query.stream()))
-    
+
     return {
         'total_posted': total_posted,
         'total_accepted': total_accepted,
