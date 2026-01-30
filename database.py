@@ -47,10 +47,23 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         reward = request_data["reward"]
         reward_auto_calculated = False
 
+    # Get poster information
+    user_ref = db.collection('users').document(user_uid)
+    user_doc = user_ref.get()
+    poster_name = 'Unknown'
+    poster_phone = 'N/A'
+
+    if user_doc.exists:
+        user_data = user_doc.to_dict()
+        poster_name = user_data.get('name', 'Unknown')
+        poster_phone = user_data.get('phone', 'N/A')
+
     request_document = {
         "request_id": request_id,
         "posted_by": user_uid,
         "poster_email": user_email,
+        "poster_name": poster_name,
+        "poster_phone": poster_phone,
 
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
@@ -140,10 +153,23 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
         reward = request_data["reward"]
         reward_auto_calculated = False
 
+    # Get poster information
+    user_ref = db.collection('users').document(user_uid)
+    user_doc = user_ref.get()
+    poster_name = 'Unknown'
+    poster_phone = 'N/A'
+
+    if user_doc.exists:
+        user_data = user_doc.to_dict()
+        poster_name = user_data.get('name', 'Unknown')
+        poster_phone = user_data.get('phone', 'N/A')
+
     request_document = {
         "request_id": request_id,
         "posted_by": user_uid,
         "poster_email": user_email,
+        "poster_name": poster_name,
+        "poster_phone": poster_phone,
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
         "pickup_area": pickup_area,
@@ -221,6 +247,39 @@ async def mark_expired_requests() -> int:
     return expired_count
 
 
+def enrich_request_with_poster_info(request_data: dict) -> dict:
+    """
+    Enrich request data with poster information from user document
+
+    Args:
+        request_data: Request data dict
+
+    Returns:
+        dict: Request data enriched with poster_name and poster_phone
+    """
+    # If already has poster info, return as is
+    if 'poster_name' in request_data and 'poster_phone' in request_data:
+        return request_data
+
+    # Get poster information
+    poster_uid = request_data.get('posted_by')
+    if poster_uid:
+        user_ref = db.collection('users').document(poster_uid)
+        user_doc = user_ref.get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            request_data['poster_name'] = user_data.get('name', 'Unknown')
+            request_data['poster_phone'] = user_data.get('phone', 'N/A')
+        else:
+            request_data['poster_name'] = 'Unknown'
+            request_data['poster_phone'] = 'N/A'
+    else:
+        request_data['poster_name'] = 'Unknown'
+        request_data['poster_phone'] = 'N/A'
+
+    return request_data
+
+
 async def get_all_requests(
         status: Optional[str] = None,
         pickup_area: Optional[str] = None,
@@ -260,6 +319,8 @@ async def get_all_requests(
         if not include_expired and request_data.get('is_expired', False):
             continue
 
+        # Enrich with poster information
+        request_data = enrich_request_with_poster_info(request_data)
         requests.append(request_data)
 
     # Sort by creation time (newest first)
@@ -274,6 +335,7 @@ async def get_user_requests(user_uid: str) -> List[dict]:
 
     ✅ FIXED: Removed .order_by() to avoid Firestore composite index requirement
     Now sorts in Python instead
+    ✅ FIXED: Added poster information enrichment
 
     Args:
         user_uid: UID of the user
@@ -283,12 +345,14 @@ async def get_user_requests(user_uid: str) -> List[dict]:
     """
     requests_ref = db.collection('requests')
     query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid))
-    # ❌ REMOVED: query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
-    # This was causing 500 error due to missing Firestore composite index
 
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
+
+        # Enrich with poster information
+        request_data = enrich_request_with_poster_info(request_data)
+
         requests.append(request_data)
 
     # ✅ FIX: Sort in Python instead (no index required)
@@ -303,6 +367,7 @@ async def get_accepted_requests(user_uid: str) -> List[dict]:
 
     ✅ FIXED: Removed .order_by() to avoid Firestore composite index requirement
     Now sorts in Python instead
+    ✅ FIXED: Added poster information enrichment
 
     Args:
         user_uid: UID of the user
@@ -312,12 +377,14 @@ async def get_accepted_requests(user_uid: str) -> List[dict]:
     """
     requests_ref = db.collection('requests')
     query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid))
-    # ❌ REMOVED: query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
-    # This was causing 500 error due to missing Firestore composite index
 
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
+
+        # Enrich with poster information
+        request_data = enrich_request_with_poster_info(request_data)
+
         requests.append(request_data)
 
     # ✅ FIX: Sort in Python instead (no index required)
@@ -339,7 +406,10 @@ async def get_request_by_id(request_id: str) -> Optional[dict]:
     doc = db.collection('requests').document(request_id).get()
 
     if doc.exists:
-        return doc.to_dict()
+        request_data = doc.to_dict()
+        # Enrich with poster information
+        request_data = enrich_request_with_poster_info(request_data)
+        return request_data
     return None
 
 
@@ -408,6 +478,9 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
     transaction = db.transaction()
     updated_request = update_in_transaction(transaction)
 
+    # Enrich with poster information
+    updated_request = enrich_request_with_poster_info(updated_request)
+
     return updated_request
 
 
@@ -475,6 +548,9 @@ async def update_request_status(
 
     request_ref.update(update_data)
     request_data.update(update_data)
+
+    # Enrich with poster information
+    request_data = enrich_request_with_poster_info(request_data)
 
     return request_data
 
