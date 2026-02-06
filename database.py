@@ -47,7 +47,7 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         reward = request_data["reward"]
         reward_auto_calculated = False
 
-    # Get poster information
+    # Get poster information from Firestore
     user_ref = db.collection('users').document(user_uid)
     user_doc = user_ref.get()
     poster_name = 'Unknown'
@@ -175,7 +175,7 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
         reward = request_data["reward"]
         reward_auto_calculated = False
 
-    # Get poster information
+    # Get poster information from Firestore
     user_ref = db.collection('users').document(user_uid)
     user_doc = user_ref.get()
     poster_name = 'Unknown'
@@ -294,100 +294,6 @@ async def mark_expired_requests() -> int:
     return expired_count
 
 
-def enrich_request_with_poster_info(request_data: dict) -> dict:
-    """
-    Enrich request data with poster information from user document
-
-    Args:
-        request_data: Request data dict
-
-    Returns:
-        dict: Request data enriched with posterName and posterPhone (camelCase)
-    """
-    # Check both snake_case and camelCase
-    has_snake_case = 'poster_name' in request_data and 'poster_phone' in request_data
-    has_camel_case = 'posterName' in request_data and 'posterPhone' in request_data
-
-    if has_snake_case or has_camel_case:
-        # If has snake_case but not camelCase, convert
-        if has_snake_case and not has_camel_case:
-            request_data['posterName'] = request_data.get('poster_name', 'Unknown')
-            request_data['posterPhone'] = request_data.get('poster_phone', 'N/A')
-        return request_data
-
-    # Get poster information
-    poster_uid = request_data.get('posted_by') or request_data.get('postedBy')
-    if poster_uid:
-        user_ref = db.collection('users').document(poster_uid)
-        user_doc = user_ref.get()
-        if user_doc.exists:
-            user_data = user_doc.to_dict()
-            poster_name = user_data.get('name', 'Unknown')
-            poster_phone = user_data.get('phone', 'N/A')
-        else:
-            poster_name = 'Unknown'
-            poster_phone = 'N/A'
-    else:
-        poster_name = 'Unknown'
-        poster_phone = 'N/A'
-
-    # Set both formats to ensure compatibility
-    request_data['poster_name'] = poster_name
-    request_data['poster_phone'] = poster_phone
-    request_data['posterName'] = poster_name
-    request_data['posterPhone'] = poster_phone
-
-    return request_data
-
-
-def enrich_request_with_acceptor_info(request_data: dict) -> dict:
-    """
-    Enrich request data with acceptor information from user document
-
-    Args:
-        request_data: Request data dict
-
-    Returns:
-        dict: Request data enriched with acceptorName and acceptorPhone (camelCase)
-    """
-    # Check both snake_case and camelCase
-    has_snake_case = 'acceptor_name' in request_data and 'acceptor_phone' in request_data
-    has_camel_case = 'acceptorName' in request_data and 'acceptorPhone' in request_data
-
-    if has_snake_case or has_camel_case:
-        # If has snake_case but not camelCase, convert
-        if has_snake_case and not has_camel_case:
-            request_data['acceptorName'] = request_data.get('acceptor_name', 'Unknown')
-            request_data['acceptorPhone'] = request_data.get('acceptor_phone', 'N/A')
-        return request_data
-
-    # Get acceptor information
-    acceptor_uid = request_data.get('accepted_by') or request_data.get('acceptedBy')
-
-    if acceptor_uid:
-        user_ref = db.collection('users').document(acceptor_uid)
-        user_doc = user_ref.get()
-        if user_doc.exists:
-            user_data = user_doc.to_dict()
-            acceptor_name = user_data.get('name', 'Unknown')
-            acceptor_phone = user_data.get('phone', 'N/A')
-        else:
-            acceptor_name = 'Unknown'
-            acceptor_phone = 'N/A'
-    else:
-        # No acceptor yet (request still open)
-        acceptor_name = None
-        acceptor_phone = None
-
-    # Set both formats to ensure compatibility
-    request_data['acceptor_name'] = acceptor_name
-    request_data['acceptor_phone'] = acceptor_phone
-    request_data['acceptorName'] = acceptor_name
-    request_data['acceptorPhone'] = acceptor_phone
-
-    return request_data
-
-
 async def get_all_requests(
         status: Optional[str] = None,
         pickup_area: Optional[str] = None,
@@ -427,11 +333,6 @@ async def get_all_requests(
         if not include_expired and request_data.get('is_expired', False):
             continue
 
-        # Enrich with poster information
-        request_data = enrich_request_with_poster_info(request_data)
-        # Enrich with acceptor information
-        request_data = enrich_request_with_acceptor_info(request_data)
-
         requests.append(request_data)
 
     # Sort by creation time (newest first)
@@ -443,10 +344,6 @@ async def get_all_requests(
 async def get_user_requests(user_uid: str) -> List[dict]:
     """
     Get all requests posted by a specific user
-
-    ✅ FIXED: Removed .order_by() to avoid Firestore composite index requirement
-    Now sorts in Python instead
-    ✅ FIXED: Added poster information enrichment
 
     Args:
         user_uid: UID of the user
@@ -460,15 +357,9 @@ async def get_user_requests(user_uid: str) -> List[dict]:
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
-
-        # Enrich with poster information
-        request_data = enrich_request_with_poster_info(request_data)
-        # Enrich with acceptor information
-        request_data = enrich_request_with_acceptor_info(request_data)
-
         requests.append(request_data)
 
-    # ✅ FIX: Sort in Python instead (no index required)
+    # Sort in Python instead (no index required)
     requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
 
     return requests
@@ -477,10 +368,6 @@ async def get_user_requests(user_uid: str) -> List[dict]:
 async def get_accepted_requests(user_uid: str) -> List[dict]:
     """
     Get all requests accepted by a specific user
-
-    ✅ FIXED: Removed .order_by() to avoid Firestore composite index requirement
-    Now sorts in Python instead
-    ✅ FIXED: Added poster information enrichment
 
     Args:
         user_uid: UID of the user
@@ -494,15 +381,9 @@ async def get_accepted_requests(user_uid: str) -> List[dict]:
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
-
-        # Enrich with poster information
-        request_data = enrich_request_with_poster_info(request_data)
-        # Enrich with acceptor information
-        request_data = enrich_request_with_acceptor_info(request_data)
-
         requests.append(request_data)
 
-    # ✅ FIX: Sort in Python instead (no index required)
+    # Sort in Python instead (no index required)
     requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
 
     return requests
@@ -522,10 +403,6 @@ async def get_request_by_id(request_id: str) -> Optional[dict]:
 
     if doc.exists:
         request_data = doc.to_dict()
-        # Enrich with poster information
-        request_data = enrich_request_with_poster_info(request_data)
-        # Enrich with acceptor information
-        request_data = enrich_request_with_acceptor_info(request_data)
         return request_data
     return None
 
@@ -546,6 +423,17 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
         HTTPException: If request not found, already accepted, or user is the poster
     """
     request_ref = db.collection('requests').document(request_id)
+
+    # Get acceptor's name and phone from Firestore BEFORE the transaction
+    user_ref = db.collection('users').document(user_uid)
+    user_doc = user_ref.get()
+    acceptor_name = 'Unknown'
+    acceptor_phone = 'N/A'
+
+    if user_doc.exists:
+        user_data = user_doc.to_dict()
+        acceptor_name = user_data.get('name', 'Unknown')
+        acceptor_phone = user_data.get('phone', 'N/A')
 
     # Use transaction for atomic update
     @firestore.transactional
@@ -571,18 +459,7 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
                 detail="You cannot accept your own request"
             )
 
-        # Get acceptor's name and phone from Firestore
-        user_ref = db.collection('users').document(user_uid)
-        user_doc = user_ref.get()
-        acceptor_name = 'Unknown'
-        acceptor_phone = 'N/A'
-
-        if user_doc.exists:
-            user_data = user_doc.to_dict()
-            acceptor_name = user_data.get('name', 'Unknown')
-            acceptor_phone = user_data.get('phone', 'N/A')
-
-        # Update request
+        # Update request with acceptor information
         now = datetime.now(timezone.utc)
         transaction.update(request_ref, {
             'status': 'accepted',
@@ -621,9 +498,6 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
     # Execute transaction
     transaction = db.transaction()
     updated_request = update_in_transaction(transaction)
-
-    # Enrich with poster information
-    updated_request = enrich_request_with_poster_info(updated_request)
 
     return updated_request
 
@@ -692,11 +566,6 @@ async def update_request_status(
 
     request_ref.update(update_data)
     request_data.update(update_data)
-
-    # Enrich with poster information
-    request_data = enrich_request_with_poster_info(request_data)
-    # Enrich with acceptor information
-    request_data = enrich_request_with_acceptor_info(request_data)
 
     return request_data
 
