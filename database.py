@@ -97,6 +97,10 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         "acceptedBy": None,  # camelCase version
         "acceptor_email": None,
         "acceptorEmail": None,  # camelCase version
+        "acceptor_name": None,
+        "acceptorName": None,  # camelCase version
+        "acceptor_phone": None,
+        "acceptorPhone": None,  # camelCase version
 
         # Timestamps
         "created_at": now,
@@ -224,6 +228,10 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
         "acceptedBy": None,  # camelCase
         "acceptor_email": None,
         "acceptorEmail": None,  # camelCase
+        "acceptor_name": None,
+        "acceptorName": None,  # camelCase
+        "acceptor_phone": None,
+        "acceptorPhone": None,  # camelCase
         "created_at": datetime.now(timezone.utc),
         "createdAt": datetime.now(timezone.utc),  # camelCase
         "accepted_at": None,
@@ -332,6 +340,54 @@ def enrich_request_with_poster_info(request_data: dict) -> dict:
     return request_data
 
 
+def enrich_request_with_acceptor_info(request_data: dict) -> dict:
+    """
+    Enrich request data with acceptor information from user document
+
+    Args:
+        request_data: Request data dict
+
+    Returns:
+        dict: Request data enriched with acceptorName and acceptorPhone (camelCase)
+    """
+    # Check both snake_case and camelCase
+    has_snake_case = 'acceptor_name' in request_data and 'acceptor_phone' in request_data
+    has_camel_case = 'acceptorName' in request_data and 'acceptorPhone' in request_data
+
+    if has_snake_case or has_camel_case:
+        # If has snake_case but not camelCase, convert
+        if has_snake_case and not has_camel_case:
+            request_data['acceptorName'] = request_data.get('acceptor_name', 'Unknown')
+            request_data['acceptorPhone'] = request_data.get('acceptor_phone', 'N/A')
+        return request_data
+
+    # Get acceptor information
+    acceptor_uid = request_data.get('accepted_by') or request_data.get('acceptedBy')
+
+    if acceptor_uid:
+        user_ref = db.collection('users').document(acceptor_uid)
+        user_doc = user_ref.get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            acceptor_name = user_data.get('name', 'Unknown')
+            acceptor_phone = user_data.get('phone', 'N/A')
+        else:
+            acceptor_name = 'Unknown'
+            acceptor_phone = 'N/A'
+    else:
+        # No acceptor yet (request still open)
+        acceptor_name = None
+        acceptor_phone = None
+
+    # Set both formats to ensure compatibility
+    request_data['acceptor_name'] = acceptor_name
+    request_data['acceptor_phone'] = acceptor_phone
+    request_data['acceptorName'] = acceptor_name
+    request_data['acceptorPhone'] = acceptor_phone
+
+    return request_data
+
+
 async def get_all_requests(
         status: Optional[str] = None,
         pickup_area: Optional[str] = None,
@@ -373,6 +429,9 @@ async def get_all_requests(
 
         # Enrich with poster information
         request_data = enrich_request_with_poster_info(request_data)
+        # Enrich with acceptor information
+        request_data = enrich_request_with_acceptor_info(request_data)
+
         requests.append(request_data)
 
     # Sort by creation time (newest first)
@@ -404,6 +463,8 @@ async def get_user_requests(user_uid: str) -> List[dict]:
 
         # Enrich with poster information
         request_data = enrich_request_with_poster_info(request_data)
+        # Enrich with acceptor information
+        request_data = enrich_request_with_acceptor_info(request_data)
 
         requests.append(request_data)
 
@@ -436,6 +497,8 @@ async def get_accepted_requests(user_uid: str) -> List[dict]:
 
         # Enrich with poster information
         request_data = enrich_request_with_poster_info(request_data)
+        # Enrich with acceptor information
+        request_data = enrich_request_with_acceptor_info(request_data)
 
         requests.append(request_data)
 
@@ -461,6 +524,8 @@ async def get_request_by_id(request_id: str) -> Optional[dict]:
         request_data = doc.to_dict()
         # Enrich with poster information
         request_data = enrich_request_with_poster_info(request_data)
+        # Enrich with acceptor information
+        request_data = enrich_request_with_acceptor_info(request_data)
         return request_data
     return None
 
@@ -506,23 +571,50 @@ async def accept_request(request_id: str, user_uid: str, user_email: str) -> dic
                 detail="You cannot accept your own request"
             )
 
+        # Get acceptor's name and phone from Firestore
+        user_ref = db.collection('users').document(user_uid)
+        user_doc = user_ref.get()
+        acceptor_name = 'Unknown'
+        acceptor_phone = 'N/A'
+
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            acceptor_name = user_data.get('name', 'Unknown')
+            acceptor_phone = user_data.get('phone', 'N/A')
+
         # Update request
         now = datetime.now(timezone.utc)
         transaction.update(request_ref, {
             'status': 'accepted',
             'accepted_by': user_uid,
+            'acceptedBy': user_uid,  # camelCase
             'acceptor_email': user_email,
+            'acceptorEmail': user_email,  # camelCase
+            'acceptor_name': acceptor_name,
+            'acceptorName': acceptor_name,  # camelCase
+            'acceptor_phone': acceptor_phone,
+            'acceptorPhone': acceptor_phone,  # camelCase
             'accepted_at': now,
-            'updated_at': now
+            'acceptedAt': now,  # camelCase
+            'updated_at': now,
+            'updatedAt': now  # camelCase
         })
 
         # Return updated data
         request_data.update({
             'status': 'accepted',
             'accepted_by': user_uid,
+            'acceptedBy': user_uid,
             'acceptor_email': user_email,
+            'acceptorEmail': user_email,
+            'acceptor_name': acceptor_name,
+            'acceptorName': acceptor_name,
+            'acceptor_phone': acceptor_phone,
+            'acceptorPhone': acceptor_phone,
             'accepted_at': now,
-            'updated_at': now
+            'acceptedAt': now,
+            'updated_at': now,
+            'updatedAt': now
         })
         return request_data
 
@@ -603,6 +695,8 @@ async def update_request_status(
 
     # Enrich with poster information
     request_data = enrich_request_with_poster_info(request_data)
+    # Enrich with acceptor information
+    request_data = enrich_request_with_acceptor_info(request_data)
 
     return request_data
 
