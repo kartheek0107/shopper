@@ -169,6 +169,8 @@ class RequestResponse(BaseModel):
     request_id: str
     posted_by: str
     poster_email: str
+    poster_name: Optional[str] = "Unknown"
+    poster_phone: Optional[str] = "N/A"
     item: List[str]
     pickup_location: str
     pickup_area: Optional[str] = None
@@ -181,6 +183,8 @@ class RequestResponse(BaseModel):
     status: RequestStatus
     accepted_by: Optional[str] = None
     acceptor_email: Optional[str] = None
+    acceptor_name: Optional[str] = None
+    acceptor_phone: Optional[str] = None
     created_at: datetime
     notes: Optional[str] = None
     deadline: datetime

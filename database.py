@@ -55,8 +55,8 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
 
     if user_doc.exists:
         user_data = user_doc.to_dict()
-        poster_name = user_data.get('name', 'Unknown')
-        poster_phone = user_data.get('phone', 'N/A')
+        poster_name = user_data.get('name')
+        poster_phone = user_data.get('phone')
 
     request_document = {
         "request_id": request_id,
