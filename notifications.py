@@ -88,7 +88,6 @@ async def send_notification(
     title: str,
     body: str,
     data: Optional[Dict] = None,
-    priority: str = "high",
     channel_id: Optional[str] = None
 ) -> bool:
     """
@@ -114,7 +113,6 @@ async def send_notification(
     try:
         # Build Android-specific config for premium experience
         android_config = messaging.AndroidConfig(
-            priority=priority,
             notification=messaging.AndroidNotification(
                 sound='default',
                 channel_id=channel_id or 'new_delivery_requests',
@@ -207,7 +205,6 @@ async def send_request_accepted_notification(
         title,
         body,
         data,
-        priority="high",
         channel_id="order_updates"
     )
 
@@ -263,7 +260,6 @@ async def send_delivery_completed_notification(
         title,
         body,
         data,
-        priority="normal",
         channel_id="order_updates"
     )
 
@@ -364,7 +360,6 @@ async def send_new_request_in_area_notification(
             title,
             body,
             data,
-            priority="high",  # HIGH priority for new requests!
             channel_id="new_delivery_requests"
         ):
             sent_count += 1
@@ -426,7 +421,6 @@ async def send_request_cancelled_notification(
         title,
         body,
         data,
-        priority="normal",
         channel_id="order_updates"
     )
 
@@ -436,7 +430,6 @@ async def send_bulk_notification(
     title: str,
     body: str,
     data: Optional[Dict] = None,
-    priority: str = "normal"
 ) -> Dict:
     """
     Send premium notification to multiple users
@@ -455,7 +448,7 @@ async def send_bulk_notification(
     failure_count = 0
 
     for uid in user_uids:
-        if await send_notification(uid, title, body, data, priority=priority):
+        if await send_notification(uid, title, body, data):
             success_count += 1
         else:
             failure_count += 1
