@@ -117,7 +117,6 @@ async def send_notification(
                 sound='default',
                 channel_id=channel_id or 'new_delivery_requests',
                 color='#14B8A6',  # Teal color
-                notification_priority=messaging.Priority.HIGH if priority == "high" else messaging.Priority.DEFAULT,
                 visibility=messaging.Visibility.PUBLIC,
                 default_sound=True,
                 default_vibrate_timings=True,
