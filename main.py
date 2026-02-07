@@ -33,7 +33,7 @@ from models import (
     UpdateConnectivityModel, SetPreferredAreasModel, SetCurrentAreaModel,
     RegisterFCMTokenModel, ReachabilityStatusResponse, AreaCountResponse,
     ConnectivityStatsResponse, EnhancedDashboardResponse,
-    CreateRatingModel, UpdateRatingModel, RatingResponse, 
+    CreateRatingModel, UpdateRatingModel, RatingResponse,
     UserRatingsResponse, CanRateResponse, RatingStatsResponse,
     RatingsGivenResponse
 )
@@ -55,7 +55,9 @@ from notifications import (
     register_fcm_token, remove_fcm_token,
     send_request_accepted_notification,
     send_delivery_completed_notification,
-    send_new_request_in_area_notification, logger
+    send_new_request_in_area_notification,
+    send_request_cancelled_notification,
+    logger
 )
 from ratings import (
     create_rating, get_user_ratings, get_rating_for_request,
@@ -63,20 +65,22 @@ from ratings import (
     update_rating, get_ratings_given_by_user
 )
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Start background tasks
     cleanup_task = asyncio.create_task(cleanup_expired_requests_job())
     print("✅ Started background cleanup job")
-    
+
     yield  # Application is running
-    
+
     # Shutdown: Cancel background tasks
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         print("🛑 Background cleanup job stopped")
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -94,8 +98,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
 
 
 # ============================================
@@ -126,7 +128,7 @@ async def root():
 async def verify_email_endpoint(email: EmailStr):
     """Check if email domain is allowed before signup"""
     is_valid = verify_email_domain(email)
-    
+
     return {
         "is_valid": is_valid,
         "message": f"Email domain is valid" if is_valid else f"Only {settings.ALLOWED_EMAIL_DOMAIN} emails allowed"
@@ -154,20 +156,20 @@ async def get_current_user_endpoint(current_user: dict = Depends(get_current_use
 
 @app.post("/user/connectivity/update", response_model=SuccessResponse)
 async def update_connectivity_endpoint(
-    data: UpdateConnectivityModel,
-    current_user: dict = Depends(get_current_user)
+        data: UpdateConnectivityModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Update user's connectivity status and auto-compute reachability with device tracking
-    
+
     Changes in this version:
     - Now accepts optional device_id and device_info
     - Enables accurate device counting and multi-account detection
     - Fully backward compatible (device_id is optional)
-    
+
     Should be called by app every 5 minutes or when connectivity changes.
     Reachability is automatically calculated as: is_connected AND location_permission_granted
-    
+
     Request Body:
     {
         "is_connected": true,
@@ -185,10 +187,10 @@ async def update_connectivity_endpoint(
             user_uid=current_user["uid"],
             is_connected=data.is_connected,
             location_permission_granted=data.location_permission_granted,
-            device_id=data.device_id,      # NEW
-            device_info=data.device_info   # NEW
+            device_id=data.device_id,  # NEW
+            device_info=data.device_info  # NEW
         )
-        
+
         return {
             "success": True,
             "message": "Connectivity updated successfully",
@@ -206,11 +208,11 @@ async def update_connectivity_endpoint(
 
 @app.get("/user/reachability/status", response_model=ReachabilityStatusResponse)
 async def get_reachability_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get current reachability status with device information
-    
+
     Returns connectivity status plus device tracking info if available
     """
     try:
@@ -235,8 +237,8 @@ async def get_areas_list(current_user: dict = Depends(get_current_user)):
 
 @app.put("/user/preferred-areas", response_model=SuccessResponse)
 async def set_preferred_areas_endpoint(
-    data: SetPreferredAreasModel,
-    current_user: dict = Depends(get_current_user)
+        data: SetPreferredAreasModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """Set user's preferred operating areas"""
     try:
@@ -244,7 +246,7 @@ async def set_preferred_areas_endpoint(
             user_uid=current_user["uid"],
             areas=data.preferred_areas
         )
-        
+
         return {
             "success": True,
             "message": "Preferred areas updated successfully",
@@ -260,8 +262,8 @@ async def set_preferred_areas_endpoint(
 
 @app.put("/user/current-area", response_model=SuccessResponse)
 async def set_current_area_endpoint(
-    data: SetCurrentAreaModel,
-    current_user: dict = Depends(get_current_user)
+        data: SetCurrentAreaModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """Set user's current area (optional)"""
     try:
@@ -269,7 +271,7 @@ async def set_current_area_endpoint(
             user_uid=current_user["uid"],
             area=data.current_area
         )
-        
+
         return {
             "success": True,
             "message": "Current area updated successfully",
@@ -281,6 +283,7 @@ async def set_current_area_endpoint(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 class UpdateGPSLocationModel(BaseModel):
     """Model for updating GPS location"""
@@ -314,27 +317,27 @@ class DetectAreaModel(BaseModel):
 
 @app.post("/location/update-gps")
 async def update_gps_location_endpoint(
-    location: UpdateGPSLocationModel,
-    current_user: dict = Depends(get_current_user)
+        location: UpdateGPSLocationModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Update user's GPS location and auto-detect area(s)
-    
+
     Handles edge cases:
     - Users on area boundaries get flagged (normal mode)
     - Users in overlapping areas get all matching areas (normal mode)
     - 50m buffer zone for edge detection
     - Users outside all areas get assigned to nearest (within 10km)
-    
+
     Fast mode (fast_mode=true):
     - 10x faster, only returns primary area
     - No edge detection, no nearby areas
     - Use for frequent background updates
-    
+
     Normal mode (fast_mode=false):
     - Complete area info with edge detection
     - Use for user-initiated location updates
-    
+
     The app should call this endpoint:
     - When user opens app: fast_mode=false (full info)
     - Background updates (every 5-10 min): fast_mode=true (fast)
@@ -348,7 +351,7 @@ async def update_gps_location_endpoint(
             accuracy=location.accuracy,
             fast_mode=location.fast_mode
         )
-        
+
         return {
             'success': True,
             'message': 'GPS location updated',
@@ -361,24 +364,24 @@ async def update_gps_location_endpoint(
 
 @app.get("/location/my-gps")
 async def get_my_gps_location_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """Get current user's stored GPS location with area info"""
     user_ref = db.collection('users').document(current_user["uid"])
     user_doc = user_ref.get()
-    
+
     if not user_doc.exists:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     user_data = user_doc.to_dict()
     gps_location = user_data.get('gps_location')
-    
+
     if not gps_location:
         return {
             'has_location': False,
             'message': 'No GPS location stored'
         }
-    
+
     return {
         'has_location': True,
         'gps_location': gps_location,
@@ -391,12 +394,12 @@ async def get_my_gps_location_endpoint(
 
 @app.post("/location/detect-area")
 async def detect_area_endpoint(
-    coords: DetectAreaModel,
-    current_user: dict = Depends(get_current_user)
+        coords: DetectAreaModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Detect which area(s) specific coordinates belong to
-    
+
     Useful for:
     - Testing area detection before saving
     - Validating pickup/drop locations
@@ -408,7 +411,7 @@ async def detect_area_endpoint(
             coords.longitude,
             include_nearby=True
         )
-        
+
         return {
             'success': True,
             'coordinates': {
@@ -423,12 +426,12 @@ async def detect_area_endpoint(
 
 @app.post("/location/nearby-users")
 async def get_nearby_users_endpoint(
-    query: NearbyUsersQuery,
-    current_user: dict = Depends(get_current_user)
+        query: NearbyUsersQuery,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Find nearby reachable users within specified radius
-    
+
     Useful for:
     - Finding deliverers near your location
     - Showing delivery options with actual distances
@@ -439,7 +442,7 @@ async def get_nearby_users_endpoint(
             longitude=query.longitude,
             radius_m=query.radius_meters
         )
-        
+
         return {
             'total': len(nearby),
             'radius_meters': query.radius_meters,
@@ -452,20 +455,20 @@ async def get_nearby_users_endpoint(
 
 @app.get("/location/users-in-area/{area_name}")
 async def get_users_in_area_endpoint(
-    area_name: str,
-    include_edge_users: bool = Query(True, description="Include users on area boundary"),
-    current_user: dict = Depends(get_current_user)
+        area_name: str,
+        include_edge_users: bool = Query(True, description="Include users on area boundary"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get all reachable users in a specific area
-    
+
     Args:
         area_name: Area name (SBIT, Pallri, etc.)
         include_edge_users: Whether to include users on the edge (default: true)
     """
     try:
         users = await get_users_in_area(area_name, include_edge_users)
-        
+
         return {
             'area': area_name,
             'total': len(users),
@@ -478,68 +481,68 @@ async def get_users_in_area_endpoint(
 
 @app.get("/location/nearby-requests-gps")
 async def get_nearby_requests_by_gps_endpoint(
-    radius_meters: float = Query(5000.0, description="Search radius in meters"),
-    current_user: dict = Depends(get_current_user)
+        radius_meters: float = Query(5000.0, description="Search radius in meters"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get requests near user's current GPS location
-    
+
     More accurate than area-based filtering.
     Requires user to have GPS location stored.
     """
     # Get user's GPS location
     user_ref = db.collection('users').document(current_user["uid"])
     user_doc = user_ref.get()
-    
+
     if not user_doc.exists:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     user_data = user_doc.to_dict()
     gps_location = user_data.get('gps_location')
-    
+
     if not gps_location:
         raise HTTPException(
             status_code=400,
             detail="GPS location not available. Please update your location first."
         )
-    
+
     user_lat = gps_location['latitude']
     user_lon = gps_location['longitude']
-    
+
     # Get all open requests
     requests_ref = db.collection('requests')
     query = requests_ref.where(filter=firestore.FieldFilter('status', '==', 'open'))
-    
+
     nearby_requests = []
-    
+
     from location_service import calculate_distance_meters
-    
+
     for doc in query.stream():
         request_data = doc.to_dict()
-        
+
         # Skip own requests
         if request_data.get('posted_by') == current_user["uid"]:
             continue
-        
+
         # Check if request has GPS coordinates for pickup
         pickup_gps = request_data.get('pickup_gps')
         if not pickup_gps:
             continue
-        
+
         # Calculate distance from user to pickup location
         distance = calculate_distance_meters(
             user_lat, user_lon,
             pickup_gps['latitude'], pickup_gps['longitude']
         )
-        
+
         if distance <= radius_meters:
             request_data['distance_meters'] = round(distance, 2)
             request_data['distance_km'] = round(distance / 1000, 2)
             nearby_requests.append(request_data)
-    
+
     # Sort by distance
     nearby_requests.sort(key=lambda x: x.get('distance_meters', 999999))
-    
+
     return {
         'total': len(nearby_requests),
         'radius_meters': radius_meters,
@@ -554,23 +557,23 @@ async def get_nearby_requests_by_gps_endpoint(
 
 @app.get("/location/check-area/{area_name}")
 async def check_if_in_area_endpoint(
-    area_name: str,
-    current_user: dict = Depends(get_current_user)
+        area_name: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Check if user's current GPS location is within a specific area
-    
+
     Useful for:
     - Verifying user is actually at pickup location
     - Confirming delivery area before accepting
     """
     try:
         result = await is_user_in_area(current_user["uid"], area_name)
-        
+
         message = f"You are {'in' if result['is_in_area'] else 'not in'} {area_name}"
         if result['is_in_area'] and result.get('is_on_edge'):
             message += " (near boundary)"
-        
+
         return {
             **result,
             'message': message
@@ -581,40 +584,40 @@ async def check_if_in_area_endpoint(
 
 @app.get("/location/area-info/{area_name}")
 async def get_area_info_endpoint(
-    area_name: str,
-    current_user: dict = Depends(get_current_user)
+        area_name: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get information about a specific area (center coordinates, radius)
-    
+
     Useful for:
     - Displaying area boundaries on map
     - Showing area coverage
     """
     info = get_area_info(area_name)
-    
+
     if not info:
         raise HTTPException(
             status_code=404,
             detail=f"Area '{area_name}' not found"
         )
-    
+
     return info
 
 
 @app.get("/location/all-areas")
 async def get_all_areas_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get information about all defined areas
-    
+
     Useful for:
     - Displaying all areas on map
     - Showing coverage zones
     """
     areas = get_all_areas_info()
-    
+
     return {
         'total': len(areas),
         'areas': areas
@@ -623,13 +626,13 @@ async def get_all_areas_endpoint(
 
 @app.post("/location/bulk-update")
 async def bulk_location_update_endpoint(
-    updates: BulkLocationUpdate,
-    current_user: dict = Depends(get_current_user)
+        updates: BulkLocationUpdate,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Bulk update locations (for testing/admin)
     Uses fast mode for efficiency
-    
+
     Example:
     {
       "updates": [
@@ -639,23 +642,23 @@ async def bulk_location_update_endpoint(
     }
     """
     from location_service import detect_area_from_coordinates_fast
-    
+
     results = []
     errors = []
-    
+
     for update in updates.updates:
         try:
             user_uid = update.get('user_uid')
             lat = update.get('latitude')
             lon = update.get('longitude')
-            
+
             if not user_uid or lat is None or lon is None:
                 errors.append(f"Invalid update: {update}")
                 continue
-            
+
             # Use ultra-fast detection
             area = detect_area_from_coordinates_fast(lat, lon)
-            
+
             # Update user
             user_ref = db.collection('users').document(user_uid)
             user_ref.update({
@@ -667,16 +670,16 @@ async def bulk_location_update_endpoint(
                 'current_area': area,
                 'updated_at': datetime.utcnow()
             })
-            
+
             results.append({
                 'user_uid': user_uid,
                 'area': area,
                 'success': True
             })
-            
+
         except Exception as e:
             errors.append(f"Error for {update}: {str(e)}")
-    
+
     return {
         'total_updates': len(updates.updates),
         'successful': len(results),
@@ -688,16 +691,16 @@ async def bulk_location_update_endpoint(
 
 @app.get("/location/performance-test")
 async def location_performance_test(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Test performance of different detection methods
-    
+
     Useful for comparing fast vs normal mode
     """
     import time
     from location_service import detect_area_from_coordinates, detect_area_from_coordinates_fast
-    
+
     # Test coordinates (SBIT area)
     test_coords = [
         (28.9890834, 77.1506293),  # SBIT center
@@ -706,7 +709,7 @@ async def location_performance_test(
         (28.9845887, 77.0373188),  # Sonepat center
         (28.920, 77.100)  # Random outside
     ]
-    
+
     # Test fast mode
     start_fast = time.time()
     fast_results = []
@@ -714,7 +717,7 @@ async def location_performance_test(
         area = detect_area_from_coordinates_fast(lat, lon)
         fast_results.append(area)
     fast_time = time.time() - start_fast
-    
+
     # Test normal mode
     start_normal = time.time()
     normal_results = []
@@ -722,7 +725,7 @@ async def location_performance_test(
         info = detect_area_from_coordinates(lat, lon, include_nearby=False)
         normal_results.append(info['primary_area'])
     normal_time = time.time() - start_normal
-    
+
     return {
         'test_iterations': len(test_coords) * 100,
         'fast_mode': {
@@ -740,13 +743,13 @@ async def location_performance_test(
 
 @app.post("/location/calculate-delivery-distance")
 async def calculate_delivery_distance_endpoint(
-    pickup: DetectAreaModel,
-    drop: DetectAreaModel,
-    current_user: dict = Depends(get_current_user)
+        pickup: DetectAreaModel,
+        drop: DetectAreaModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Calculate distance and area info for a delivery route
-    
+
     Useful for:
     - Estimating delivery distance before creating request
     - Showing route information
@@ -762,7 +765,7 @@ async def calculate_delivery_distance_endpoint(
                 'longitude': drop.longitude
             }
         )
-        
+
         return {
             'success': True,
             'pickup': {
@@ -789,25 +792,25 @@ async def calculate_delivery_distance_endpoint(
 
 @app.get("/users/reachable-count")
 async def get_reachable_count_endpoint(
-    area: Optional[str] = Query(None, description="Filter by specific area"),
-    count_by_device: bool = Query(True, description="Count unique devices instead of users"),
-    current_user: dict = Depends(get_current_user)
+        area: Optional[str] = Query(None, description="Filter by specific area"),
+        count_by_device: bool = Query(True, description="Count unique devices instead of users"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get count of reachable users or unique devices, optionally filtered by area
-    
+
     NEW PARAMETER:
     - count_by_device: If true (default), counts unique devices; if false, counts users
-    
+
     Benefits of device counting:
     - Prevents double-counting users with multiple accounts
     - More accurate availability metrics
     - Better capacity planning
-    
+
     Examples:
     - GET /users/reachable-count?area=SBIT&count_by_device=true
       Returns: Unique devices in SBIT area
-    
+
     - GET /users/reachable-count?count_by_device=false
       Returns: Total user count (old behavior)
     """
@@ -816,10 +819,10 @@ async def get_reachable_count_endpoint(
             area=area,
             count_by_device=count_by_device
         )
-        
+
         counting_method = "unique_devices" if count_by_device else "users"
         area_msg = f" in {area}" if area else ""
-        
+
         return {
             "count": count,
             "counting_method": counting_method,  # NEW
@@ -832,23 +835,23 @@ async def get_reachable_count_endpoint(
 
 @app.get("/users/reachable-by-area", response_model=AreaCountResponse)
 async def get_reachable_by_area_endpoint(
-    count_by_device: bool = Query(True, description="Count unique devices per area"),
-    current_user: dict = Depends(get_current_user)
+        count_by_device: bool = Query(True, description="Count unique devices per area"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get count of reachable users or devices grouped by all areas
-    
+
     NEW PARAMETER:
     - count_by_device: If true (default), counts unique devices per area
-    
-    Note: When device counting is enabled, same device won't be counted 
+
+    Note: When device counting is enabled, same device won't be counted
     multiple times across different areas
     """
     try:
         area_counts = await get_reachable_users_by_area(
             count_by_device=count_by_device
         )
-        
+
         return {
             "area_counts": area_counts,
             "counting_method": "unique_devices" if count_by_device else "users",  # NEW
@@ -860,9 +863,9 @@ async def get_reachable_by_area_endpoint(
 
 @app.get("/users/available")
 async def get_available_users_endpoint(
-    area: Optional[str] = Query(None, description="Filter by specific area"),
-    preferred_areas: bool = Query(False, description="Only users with preferred areas"),
-    current_user: dict = Depends(get_current_user)
+        area: Optional[str] = Query(None, description="Filter by specific area"),
+        preferred_areas: bool = Query(False, description="Only users with preferred areas"),
+        current_user: dict = Depends(get_current_user)
 ):
     """Get list of available (reachable) users with filters"""
     try:
@@ -884,17 +887,17 @@ async def get_available_users_endpoint(
 
 @app.get("/users/unique-devices")
 async def get_unique_devices_endpoint(
-    area: Optional[str] = Query(None, description="Filter by specific area"),
-    current_user: dict = Depends(get_current_user)
+        area: Optional[str] = Query(None, description="Filter by specific area"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get count of unique reachable devices with detailed breakdown
-    
+
     Returns:
     - Unique device count
     - Total user count for comparison
     - Users without device_id (using fallback counting)
-    
+
     Useful for:
     - Monitoring device adoption
     - Identifying deduplication effectiveness
@@ -902,7 +905,7 @@ async def get_unique_devices_endpoint(
     """
     try:
         from connectivity import get_unique_reachable_devices
-        
+
         result = await get_unique_reachable_devices(area=area)
         return result
     except Exception as e:
@@ -911,17 +914,17 @@ async def get_unique_devices_endpoint(
 
 @app.get("/analytics/device-distribution")
 async def get_device_distribution_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get device analytics across all areas
-    
+
     Returns per-area breakdown:
     - Unique devices
     - Total users
     - Users without device_id
     - Device coverage percentage
-    
+
     Useful for:
     - Understanding device adoption per area
     - Identifying areas needing mobile app updates
@@ -929,7 +932,7 @@ async def get_device_distribution_endpoint(
     """
     try:
         from areas import get_area_device_analytics
-        
+
         analytics = await get_area_device_analytics()
         return {
             "area_analytics": analytics,
@@ -937,7 +940,7 @@ async def get_device_distribution_endpoint(
                 "total_unique_devices": sum(a['unique_devices'] for a in analytics.values()),
                 "total_users": sum(a['total_users'] for a in analytics.values()),
                 "overall_coverage_pct": round(
-                    sum(a['unique_devices'] for a in analytics.values()) / 
+                    sum(a['unique_devices'] for a in analytics.values()) /
                     sum(a['total_users'] for a in analytics.values()) * 100
                     if sum(a['total_users'] for a in analytics.values()) > 0 else 0,
                     2
@@ -950,16 +953,16 @@ async def get_device_distribution_endpoint(
 
 @app.get("/analytics/device-info")
 async def get_device_analytics_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get detailed device analytics including OS distribution
-    
+
     Returns:
     - Total devices tracked
     - OS distribution (Android, iOS counts)
     - Devices with multiple accounts (edge case detection)
-    
+
     Useful for:
     - Platform distribution insights
     - Multi-account detection
@@ -967,7 +970,7 @@ async def get_device_analytics_endpoint(
     """
     try:
         from connectivity import get_device_analytics
-        
+
         analytics = await get_device_analytics()
         return analytics
     except Exception as e:
@@ -1031,7 +1034,7 @@ async def create_request_endpoint(
 
 @app.post("/request/cleanup-expired")
 async def cleanup_expired_requests(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Manually trigger cleanup of expired requests
@@ -1049,16 +1052,16 @@ async def cleanup_expired_requests(
 
 @app.get("/request/all", response_model=List[RequestResponse])
 async def get_all_requests_endpoint(
-    status: Optional[RequestStatus] = Query(None, description="Filter by status"),
-    pickup_area: Optional[str] = Query(None, description="Filter by pickup area"),
-    drop_area: Optional[str] = Query(None, description="Filter by drop area"),
-    priority_only: bool = Query(False, description="Show only priority requests"),
-    include_expired: bool = Query(False, description="Include expired requests"),
-    current_user: dict = Depends(get_current_user)
+        status: Optional[RequestStatus] = Query(None, description="Filter by status"),
+        pickup_area: Optional[str] = Query(None, description="Filter by pickup area"),
+        drop_area: Optional[str] = Query(None, description="Filter by drop area"),
+        priority_only: bool = Query(False, description="Show only priority requests"),
+        include_expired: bool = Query(False, description="Include expired requests"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get all requests with optional filters
-    
+
     Query params:
     - status: open, accepted, completed, cancelled (optional)
     - pickup_area: Filter by pickup area (optional)
@@ -1083,11 +1086,11 @@ async def get_all_requests_endpoint(
 
 @app.get("/request/nearby", response_model=List[RequestResponse])
 async def get_nearby_requests_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get requests near user's current or preferred areas
-    
+
     Returns open requests where pickup or drop area matches user's areas.
     Excludes user's own requests.
     """
@@ -1100,7 +1103,7 @@ async def get_nearby_requests_endpoint(
 
 @app.get("/request/mine", response_model=List[RequestResponse])
 async def get_my_requests_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """Get all requests posted by the current user"""
     try:
@@ -1112,7 +1115,7 @@ async def get_my_requests_endpoint(
 
 @app.get("/request/accepted", response_model=List[RequestResponse])
 async def get_my_accepted_requests_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """Get all requests accepted by the current user"""
     try:
@@ -1124,29 +1127,29 @@ async def get_my_accepted_requests_endpoint(
 
 @app.get("/request/status/{request_id}", response_model=RequestResponse)
 async def get_request_status_endpoint(
-    request_id: str,
-    current_user: dict = Depends(get_current_user)
+        request_id: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """Get status and details of a specific request"""
     request = await get_request_by_id(request_id)
-    
+
     if not request:
         raise HTTPException(status_code=404, detail="Request not found")
-    
+
     return request
 
 
 @app.post("/request/accept", response_model=RequestResponse)
 async def accept_request_endpoint(
-    request_data: AcceptRequestModel,
-    current_user: dict = Depends(get_current_user)
+        request_data: AcceptRequestModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Accept an open request
-    
+
     Only one user can accept a request (atomic operation).
     Users cannot accept their own requests.
-    Sends notification to the poster.
+    Sends premium notification to the poster with acceptor's NAME.
     """
     try:
         updated_request = await accept_request(
@@ -1154,18 +1157,19 @@ async def accept_request_endpoint(
             user_uid=current_user["uid"],
             user_email=current_user["email"]
         )
-        
-        # Send notification to poster
+
+        # ✅ PREMIUM NOTIFICATION - Use acceptor UID instead of email
         try:
             await send_request_accepted_notification(
                 poster_uid=updated_request['posted_by'],
-                acceptor_email=current_user["email"],
+                acceptor_uid=current_user["uid"],  # ✅ Changed from acceptor_email to acceptor_uid
                 item=updated_request['item'],
                 request_id=updated_request['request_id']
             )
+            logger.info(f"✅ Poster notified about acceptance")
         except Exception as e:
-            print(f"Failed to send notification: {e}")
-        
+            logger.error(f"⚠️ Failed to send notification: {e}")
+
         return updated_request
     except HTTPException:
         raise
@@ -1175,18 +1179,18 @@ async def accept_request_endpoint(
 
 @app.post("/request/update-status", response_model=RequestResponse)
 async def update_request_status_endpoint(
-    update_data: UpdateRequestStatusModel,
-    current_user: dict = Depends(get_current_user)
+        update_data: UpdateRequestStatusModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Update request status
-    
+
     Only the request poster or acceptor can update status.
     Valid transitions:
     - open -> accepted, cancelled
     - accepted -> completed, cancelled
-    
-    Sends notification when completed.
+
+    Sends premium notification when completed with deliverer's NAME.
     """
     try:
         updated_request = await update_request_status(
@@ -1194,19 +1198,20 @@ async def update_request_status_endpoint(
             new_status=update_data.status.value,
             user_uid=current_user["uid"]
         )
-        
-        # Send notification if completed
+
+        # ✅ PREMIUM NOTIFICATION - Use deliverer UID instead of email
         if update_data.status.value == 'completed':
             try:
                 await send_delivery_completed_notification(
                     poster_uid=updated_request['posted_by'],
-                    deliverer_email=updated_request.get('acceptor_email', 'Unknown'),
+                    deliverer_uid=current_user["uid"],  # ✅ Changed from deliverer_email to deliverer_uid
                     item=updated_request['item'],
                     request_id=updated_request['request_id']
                 )
+                logger.info(f"✅ Poster notified about completion")
             except Exception as e:
-                print(f"Failed to send notification: {e}")
-        
+                logger.error(f"⚠️ Failed to send notification: {e}")
+
         return updated_request
     except HTTPException:
         raise
@@ -1220,12 +1225,12 @@ async def update_request_status_endpoint(
 
 @app.post("/notifications/register", response_model=SuccessResponse)
 async def register_fcm_token_endpoint(
-    data: RegisterFCMTokenModel,
-    current_user: dict = Depends(get_current_user)
+        data: RegisterFCMTokenModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Register FCM token for push notifications
-    
+
     Should be called when app starts and token is available.
     """
     try:
@@ -1240,7 +1245,7 @@ async def register_fcm_token_endpoint(
 
 @app.delete("/notifications/unregister", response_model=SuccessResponse)
 async def unregister_fcm_token_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Remove FCM token (on logout)
@@ -1258,30 +1263,30 @@ async def unregister_fcm_token_endpoint(
 
 @app.get("/user/profile")
 async def get_user_profile_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """Get current user's full profile with all Phase 3 fields"""
     profile = await get_user_profile(current_user["uid"])
-    
+
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-    
+
     return profile
 
 
 @app.put("/user/profile", response_model=SuccessResponse)
 async def update_user_profile_endpoint(
-    profile_data: UpdateProfileModel,
-    current_user: dict = Depends(get_current_user)
+        profile_data: UpdateProfileModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """Update user profile (name, phone, etc.)"""
     try:
         # Filter out None values
         update_dict = {k: v for k, v in profile_data.dict().items() if v is not None}
-        
+
         if not update_dict:
             raise HTTPException(status_code=400, detail="No data to update")
-        
+
         updated_profile = await update_user_profile(
             user_uid=current_user["uid"],
             profile_data=update_dict
@@ -1297,7 +1302,7 @@ async def update_user_profile_endpoint(
 
 @app.get("/user/stats", response_model=RequestStatsResponse)
 async def get_user_stats_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """Get user statistics (requests posted, accepted, completed)"""
     try:
@@ -1313,18 +1318,18 @@ async def get_user_stats_endpoint(
 
 @app.post("/rating/create", response_model=RatingResponse)
 async def create_rating_endpoint(
-    rating_data: CreateRatingModel,
-    current_user: dict = Depends(get_current_user)
+        rating_data: CreateRatingModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Create a rating for a completed delivery
-    
+
     Requirements:
     - User must be the request poster
     - Request must be completed
     - Poster hasn't already rated this delivery
     - Rating must be 1-5 stars
-    
+
     Only the poster can rate the deliverer (acceptor).
     """
     try:
@@ -1334,9 +1339,9 @@ async def create_rating_endpoint(
             rating=rating_data.rating,
             comment=rating_data.comment
         )
-        
+
         return rating
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1345,13 +1350,13 @@ async def create_rating_endpoint(
 
 @app.put("/rating/{rating_id}", response_model=RatingResponse)
 async def update_rating_endpoint(
-    rating_id: str,
-    update_data: UpdateRatingModel,
-    current_user: dict = Depends(get_current_user)
+        rating_id: str,
+        update_data: UpdateRatingModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Update an existing rating (within 24 hours)
-    
+
     Only the poster who created the rating can update it.
     """
     try:
@@ -1361,9 +1366,9 @@ async def update_rating_endpoint(
             new_rating=update_data.rating,
             new_comment=update_data.comment
         )
-        
+
         return updated_rating
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1372,12 +1377,12 @@ async def update_rating_endpoint(
 
 @app.get("/rating/deliverer/{user_uid}", response_model=UserRatingsResponse)
 async def get_deliverer_ratings_endpoint(
-    user_uid: str,
-    current_user: dict = Depends(get_current_user)
+        user_uid: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get all ratings received by a user as a deliverer
-    
+
     Returns rating statistics and individual ratings with comments.
     Useful for viewing a deliverer's reputation.
     """
@@ -1390,11 +1395,11 @@ async def get_deliverer_ratings_endpoint(
 
 @app.get("/rating/my-deliverer-ratings", response_model=UserRatingsResponse)
 async def get_my_deliverer_ratings_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get all ratings you've received as a deliverer
-    
+
     Shows your delivery performance ratings.
     """
     try:
@@ -1406,11 +1411,11 @@ async def get_my_deliverer_ratings_endpoint(
 
 @app.get("/rating/my-given-ratings", response_model=RatingsGivenResponse)
 async def get_my_given_ratings_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get all ratings you've given as a poster
-    
+
     Shows all the deliverers you've rated.
     """
     try:
@@ -1425,23 +1430,23 @@ async def get_my_given_ratings_endpoint(
 
 @app.get("/rating/request/{request_id}")
 async def get_request_rating_endpoint(
-    request_id: str,
-    current_user: dict = Depends(get_current_user)
+        request_id: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get rating for a specific request
-    
+
     Returns the rating if it exists, useful for checking if you've already rated.
     """
     try:
         rating = await get_rating_for_request(request_id)
-        
+
         if not rating:
             return {
                 "exists": False,
                 "message": "No rating found for this request"
             }
-        
+
         return {
             "exists": True,
             "rating": rating
@@ -1452,12 +1457,12 @@ async def get_request_rating_endpoint(
 
 @app.get("/rating/can-rate/{request_id}", response_model=CanRateResponse)
 async def can_rate_request_endpoint(
-    request_id: str,
-    current_user: dict = Depends(get_current_user)
+        request_id: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Check if current user can rate the deliverer for a request
-    
+
     Returns:
     - Whether rating is possible
     - Who would be rated (deliverer info)
@@ -1473,12 +1478,12 @@ async def can_rate_request_endpoint(
 
 @app.get("/rating/summary/{user_uid}", response_model=RatingStatsResponse)
 async def get_deliverer_rating_summary_endpoint(
-    user_uid: str,
-    current_user: dict = Depends(get_current_user)
+        user_uid: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get summarized rating information for a deliverer
-    
+
     Useful for displaying in:
     - User profiles
     - Available deliverers list
@@ -1495,11 +1500,11 @@ async def get_deliverer_rating_summary_endpoint(
 
 @app.get("/rating/my-summary", response_model=RatingStatsResponse)
 async def get_my_rating_summary_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get your own rating summary as a deliverer
-    
+
     Shows your delivery reputation score.
     """
     try:
@@ -1513,12 +1518,12 @@ async def get_my_rating_summary_endpoint(
 
 @app.delete("/rating/{rating_id}", response_model=SuccessResponse)
 async def delete_rating_endpoint(
-    rating_id: str,
-    current_user: dict = Depends(get_current_user)
+        rating_id: str,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Delete a rating (within 24 hours of creation)
-    
+
     Only the poster who created the rating can delete it.
     """
     try:
@@ -1536,11 +1541,11 @@ async def delete_rating_endpoint(
 
 @app.get("/dashboard/enhanced")
 async def enhanced_dashboard_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Enhanced dashboard with area-based stats and rating info
-    
+
     Returns:
     - User profile with reachability
     - Request statistics
@@ -1552,10 +1557,10 @@ async def enhanced_dashboard_endpoint(
     try:
         # Get user profile
         user_profile = await get_user_profile(current_user["uid"])
-        
+
         # Get user stats
         stats = await get_user_stats(current_user["uid"])
-        
+
         # Get deliverer rating summary
         try:
             deliverer_rating = await get_user_rating_summary(current_user["uid"])
@@ -1565,18 +1570,18 @@ async def enhanced_dashboard_endpoint(
                 "total_ratings": 0,
                 "rating_badge": "No Ratings Yet"
             }
-        
+
         # Get reachable users by area
         reachable_by_area = await get_reachable_users_by_area()
-        
+
         # Get user's active requests
         active_requests = await get_user_requests(current_user["uid"])
         active_requests = [r for r in active_requests if r.get('status') == 'open'][:5]
-        
+
         # Get nearby requests
         nearby_requests = await get_nearby_requests(current_user["uid"])
         nearby_requests = nearby_requests[:10]  # Limit to 10
-        
+
         return {
             "user": user_profile,
             "stats": stats,
@@ -1597,11 +1602,11 @@ async def dashboard_endpoint(current_user: dict = Depends(get_current_user)):
     try:
         # Get user stats
         stats = await get_user_stats(current_user["uid"])
-        
+
         # Get recent requests
         my_requests = await get_user_requests(current_user["uid"])
         accepted_requests = await get_accepted_requests(current_user["uid"])
-        
+
         return {
             "message": f"Welcome, {current_user['email']}!",
             "user_id": current_user["uid"],
@@ -1619,16 +1624,16 @@ async def dashboard_endpoint(current_user: dict = Depends(get_current_user)):
 
 @app.get("/admin/connectivity-stats", response_model=ConnectivityStatsResponse)
 async def get_connectivity_stats_endpoint(
-    current_user: dict = Depends(get_current_user)
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Get overall connectivity statistics with device tracking
-    
+
     NEW FIELDS:
     - unique_devices: Count of unique devices
     - users_with_devices: Users who have device_id registered
     - multi_device_users: Edge case indicator (should be near 0)
-    
+
     Note: In production, this should be admin-only
     """
     try:
@@ -1644,33 +1649,33 @@ async def get_connectivity_stats_endpoint(
 
 @app.get("/debug/device-count-comparison")
 async def device_count_comparison_endpoint(
-    area: Optional[str] = Query(None, description="Optional area filter"),
-    current_user: dict = Depends(get_current_user)
+        area: Optional[str] = Query(None, description="Optional area filter"),
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Compare user-based vs device-based counting
-    
+
     Useful for:
     - Verifying device counting works correctly
     - Understanding deduplication impact
     - Testing and debugging
-    
+
     Returns side-by-side comparison of both counting methods
     """
     try:
         # Get counts using both methods
         user_count = await get_reachable_users_count(
-            area=area, 
+            area=area,
             count_by_device=False
         )
-        
+
         device_count = await get_reachable_users_count(
-            area=area, 
+            area=area,
             count_by_device=True
         )
-        
+
         deduplication_count = user_count - device_count
-        
+
         return {
             "area": area or "all",
             "user_based_count": user_count,
@@ -1695,11 +1700,12 @@ async def device_count_comparison_endpoint(
 if __name__ == "__main__":
     import uvicorn
     import sys
-    
+
     if sys.platform == "win32":
         import multiprocessing
+
         multiprocessing.freeze_support()
-    
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
