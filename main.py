@@ -55,7 +55,7 @@ from notifications import (
     register_fcm_token, remove_fcm_token,
     send_request_accepted_notification,
     send_delivery_completed_notification,
-    send_new_request_in_area_notification
+    send_new_request_in_area_notification, logger
 )
 from ratings import (
     create_rating, get_user_ratings, get_rating_for_request,
@@ -980,14 +980,14 @@ async def get_device_analytics_endpoint(
 
 @app.post("/request/create", response_model=RequestResponse)
 async def create_request_endpoint(
-    request_data: CreateRequestModel,
-    current_user: dict = Depends(get_current_user)
+        request_data: CreateRequestModel,
+        current_user: dict = Depends(get_current_user)
 ):
     """
     Create a new delivery request with area support
-    
+
     Requires authentication. User must be verified.
-    Optional: Sends notifications to users in the pickup area.
+    Sends premium notifications to users in the pickup/drop areas.
     """
     try:
         request_dict = request_data.dict()
@@ -996,23 +996,38 @@ async def create_request_endpoint(
             user_email=current_user["email"],
             request_data=request_dict
         )
-        
-        # Send notifications to users in the area (optional)
-        if settings.SEND_NEW_REQUEST_NOTIFICATIONS and created_request.get('pickup_area'):
+
+        # ✅ PREMIUM NOTIFICATIONS - Send to users in pickup AND drop areas
+        if settings.SEND_NEW_REQUEST_NOTIFICATIONS:
             try:
-                await send_new_request_in_area_notification(
-                    area=created_request['pickup_area'],
+                # Extract all needed info
+                pickup_area = created_request.get('pickup_area')
+                drop_area = created_request.get('drop_area')
+
+                # Send notifications with full rich data
+                notifications_sent = await send_new_request_in_area_notification(
+                    area=pickup_area,  # Backward compatibility
                     item=created_request['item'],
                     request_id=created_request['request_id'],
-                    exclude_uid=current_user["uid"]
+                    exclude_uid=current_user["uid"],
+                    poster_uid=current_user["uid"],  # ✅ NEW: For getting poster name
+                    pickup_area=pickup_area,  # ✅ NEW: For rich notification
+                    drop_area=drop_area,  # ✅ NEW: For rich notification
+                    reward=created_request.get('reward'),  # ✅ NEW: Show reward
+                    deadline=created_request.get('deadline').isoformat() if created_request.get('deadline') else None
+                    # ✅ NEW: Show deadline
                 )
+
+                logger.info(f"✅ Sent {notifications_sent} premium notifications")
+
             except Exception as e:
                 # Log but don't fail the request creation
-                print(f"Failed to send notifications: {e}")
-        
+                logger.error(f"⚠️ Failed to send notifications: {e}")
+
         return created_request
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.post("/request/cleanup-expired")
 async def cleanup_expired_requests(
