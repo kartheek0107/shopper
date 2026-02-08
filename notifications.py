@@ -117,6 +117,7 @@ async def send_notification(
                 sound='default',
                 channel_id=channel_id or 'new_delivery_requests',
                 color='#14B8A6',  # Teal color
+                visibility=messaging.Visibility.PUBLIC,
                 default_sound=True,
                 default_vibrate_timings=True,
                 default_light_settings=True
