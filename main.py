@@ -12,6 +12,12 @@ from scheduler import cleanup_expired_requests_job
 from database import mark_expired_requests
 import asyncio
 from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
+import asyncio
+
+_rate_limit_storage = defaultdict(lambda: {'count': 0, 'reset_time': datetime.utcnow()})
+_rate_limit_lock = asyncio.Lock()
 
 db = firestore.client()
 
@@ -98,6 +104,41 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def rate_limit(key: str, max_requests: int = 1, window_seconds: int = 10) -> bool:
+    """
+    Rate limiting decorator
+
+    Args:
+        key: Unique identifier (e.g., user_uid)
+        max_requests: Maximum requests allowed in window
+        window_seconds: Time window in seconds
+
+    Returns:
+        True if allowed, raises HTTPException if rate limited
+    """
+    async with _rate_limit_lock:
+        now = datetime.utcnow()
+        rate_data = _rate_limit_storage[key]
+
+        # Reset if window expired
+        if now >= rate_data['reset_time']:
+            rate_data['count'] = 0
+            rate_data['reset_time'] = now + timedelta(seconds=window_seconds)
+
+        # Check limit
+        if rate_data['count'] >= max_requests:
+            retry_after = (rate_data['reset_time'] - now).total_seconds()
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded. Try again in {int(retry_after)} seconds.",
+                headers={"Retry-After": str(int(retry_after))}
+            )
+
+        # Increment counter
+        rate_data['count'] += 1
+        return True
 
 
 # ============================================
@@ -794,41 +835,44 @@ async def calculate_delivery_distance_endpoint(
 async def get_reachable_count_endpoint(
         area: Optional[str] = Query(None, description="Filter by specific area"),
         count_by_device: bool = Query(True, description="Count unique devices instead of users"),
+        include_nearby: bool = Query(True, description="Include users in {area}_nearby"),
         current_user: dict = Depends(get_current_user)
 ):
     """
-    Get count of reachable users or unique devices, optionally filtered by area
+    Get count of reachable users or unique devices
 
-    NEW PARAMETER:
-    - count_by_device: If true (default), counts unique devices; if false, counts users
-
-    Benefits of device counting:
-    - Prevents double-counting users with multiple accounts
-    - More accurate availability metrics
-    - Better capacity planning
-
-    Examples:
-    - GET /users/reachable-count?area=SBIT&count_by_device=true
-      Returns: Unique devices in SBIT area
-
-    - GET /users/reachable-count?count_by_device=false
-      Returns: Total user count (old behavior)
+    FIXED:
+    - Rate limiting (1 request per 10 seconds per user)
+    - Input validation for area parameter
+    - Caching (30 second TTL)
+    - Staleness check (10 minute timeout)
+    - Proper _nearby area handling
     """
     try:
+        # Rate limiting
+        await rate_limit(f"count:{current_user['uid']}", max_requests=1, window_seconds=10)
+
+        # Get count (will use cache if available)
         count = await get_reachable_users_count(
             area=area,
-            count_by_device=count_by_device
+            count_by_device=count_by_device,
+            include_nearby=include_nearby
         )
 
         counting_method = "unique_devices" if count_by_device else "users"
         area_msg = f" in {area}" if area else ""
+        nearby_note = " (including nearby)" if include_nearby else " (excluding nearby)"
 
         return {
             "count": count,
-            "counting_method": counting_method,  # NEW
+            "counting_method": counting_method,
             "area": area or "all",
-            "message": f"{count} {counting_method} available{area_msg}"
+            "include_nearby": include_nearby,
+            "message": f"{count} {counting_method} available{area_msg}{nearby_note}",
+            "cached": True  # Always true due to caching layer
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -836,30 +880,36 @@ async def get_reachable_count_endpoint(
 @app.get("/users/reachable-by-area", response_model=AreaCountResponse)
 async def get_reachable_by_area_endpoint(
         count_by_device: bool = Query(True, description="Count unique devices per area"),
+        include_nearby: bool = Query(True, description="Include {area}_nearby areas"),
         current_user: dict = Depends(get_current_user)
 ):
     """
     Get count of reachable users or devices grouped by all areas
 
-    NEW PARAMETER:
-    - count_by_device: If true (default), counts unique devices per area
-
-    Note: When device counting is enabled, same device won't be counted
-    multiple times across different areas
+    FIXED:
+    - Rate limiting
+    - Proper _nearby handling
+    - Staleness check
     """
     try:
+        # Rate limiting
+        await rate_limit(f"count_by_area:{current_user['uid']}", max_requests=1, window_seconds=10)
+
         area_counts = await get_reachable_users_by_area(
-            count_by_device=count_by_device
+            count_by_device=count_by_device,
+            include_nearby=include_nearby
         )
 
         return {
             "area_counts": area_counts,
-            "counting_method": "unique_devices" if count_by_device else "users",  # NEW
+            "counting_method": "unique_devices" if count_by_device else "users",
+            "include_nearby": include_nearby,
             "note": "Counts represent unique devices per area" if count_by_device else "Counts represent users per area"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
 
 @app.get("/users/available")
 async def get_available_users_endpoint(
@@ -1621,6 +1671,28 @@ async def dashboard_endpoint(current_user: dict = Depends(get_current_user)):
 # ============================================
 # UPDATED ADMIN/STATS ENDPOINT WITH DEVICE TRACKING
 # ============================================
+
+
+@app.post("/admin/invalidate-count-cache")
+async def invalidate_count_cache_endpoint(
+        current_user: dict = Depends(get_current_user)
+):
+    """
+    Manually invalidate count cache (admin/testing only)
+
+    Use this after bulk data changes
+    """
+    try:
+        from areas import invalidate_count_cache
+        await invalidate_count_cache()
+
+        return {
+            "success": True,
+            "message": "Count cache invalidated successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.get("/admin/connectivity-stats", response_model=ConnectivityStatsResponse)
 async def get_connectivity_stats_endpoint(

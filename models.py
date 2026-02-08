@@ -16,19 +16,27 @@ class RequestStatus(str, Enum):
 # CONNECTIVITY MODELS (UPDATED WITH DEVICE_ID)
 # ============================================
 
+class DeviceInfo(BaseModel):
+    """Device information model"""
+    os: Optional[str] = None
+    model: Optional[str] = None
+    app_version: Optional[str] = None
+    manufacturer: Optional[str] = None
+
+
 class UpdateConnectivityModel(BaseModel):
     """Model for updating connectivity status with device tracking"""
     is_connected: bool = Field(..., description="Internet connectivity status")
     location_permission_granted: bool = Field(..., description="Location permission status")
     device_id: Optional[str] = Field(
-        None, 
-        description="Unique device identifier (Android ID, IDFV, or app-generated UUID)",
+        None,
+        description="Unique device identifier",
         min_length=1,
         max_length=255
     )
-    device_info: Optional[dict] = Field(
+    device_info: Optional[DeviceInfo] = Field(  # ✅ Uses DeviceInfo model
         None,
-        description="Optional device metadata (OS, model, app version)"
+        description="Optional device metadata"
     )
 
     @field_validator('device_id')
