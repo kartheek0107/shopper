@@ -31,7 +31,6 @@ class UpdateConnectivityModel(BaseModel):
     device_id: Optional[str] = Field(
         None,
         description="Unique device identifier",
-        min_length=1,
         max_length=255
     )
     device_info: Optional[DeviceInfo] = Field(  # ✅ Uses DeviceInfo model
@@ -46,8 +45,8 @@ class UpdateConnectivityModel(BaseModel):
         if v is not None:
             # Strip whitespace
             v = v.strip()
-            if not v:
-                raise ValueError('device_id cannot be empty string')
+            if not v or len(v) < 5:
+                raise None
         return v
 
 
