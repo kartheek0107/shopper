@@ -275,8 +275,8 @@ async def send_new_request_in_area_notification(
     deadline: Optional[str] = None
 ) -> int:
     """
-    PREMIUM: Notify users about new delivery request
-    Uses POSTER'S NAME, rich content, smart targeting
+    PREMIUM: Notify ALL REACHABLE users about new delivery request
+    Uses POSTER'S NAME, rich content
 
     Args:
         area: Area where request is posted (for backward compatibility)
@@ -303,7 +303,7 @@ async def send_new_request_in_area_notification(
     target_pickup = pickup_area or area
     target_drop = drop_area or area
 
-    # Get all reachable users
+    # Get all reachable users (NO AREA FILTERING)
     users_ref = db.collection('users')
     query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
 
@@ -333,11 +333,7 @@ async def send_new_request_in_area_notification(
 
     sent_count = 0
 
-    # Target users in BOTH pickup and drop areas
-    target_areas = [target_pickup]
-    if target_drop and target_drop != target_pickup:
-        target_areas.append(target_drop)
-
+    # ✅ NOTIFY ALL REACHABLE USERS (removed area filtering)
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
         user_uid = user_data.get('uid')
@@ -346,13 +342,7 @@ async def send_new_request_in_area_notification(
         if user_uid == exclude_uid:
             continue
 
-        # Check if user has either area in preferences
-        preferred_areas = user_data.get('preferred_areas', [])
-        has_matching_area = any(target_area in preferred_areas for target_area in target_areas)
-
-        if not has_matching_area:
-            continue
-
+        # ✅ REMOVED: Area filtering - now everyone gets notified!
         # Send HIGH PRIORITY notification
         if await send_notification(
             user_uid,
@@ -363,11 +353,10 @@ async def send_new_request_in_area_notification(
         ):
             sent_count += 1
 
-    logger.info(f"✅ Sent {sent_count} premium notifications for new request in {target_pickup} → {target_drop}")
-    logger.info(f"📦 Items: {items_text} | 💰 Reward: ₹{reward if reward else 'N/A'}")
+    logger.info(f"✅ Sent {sent_count} notifications to ALL reachable users")
+    logger.info(f"📦 Request: {target_pickup} → {target_drop} | Items: {items_text} | 💰 Reward: ₹{reward if reward else 'N/A'}")
 
     return sent_count
-
 
 async def send_request_cancelled_notification(
     acceptor_uid: str,
