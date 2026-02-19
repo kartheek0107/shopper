@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 # Get Firestore client
 db = firestore.client()
 
-VISIBILITY_PRIVATE = 0
-VISIBILITY_PUBLIC = 1
-VISIBILITY_SECRET = 2
+VISIBILITY_PRIVATE = "private"
+VISIBILITY_PUBLIC = "public"
+VISIBILITY_SECRET = "secret"
 
 
 async def register_fcm_token(user_uid: str, fcm_token: str) -> Dict:
