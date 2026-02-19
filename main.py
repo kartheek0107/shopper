@@ -1331,7 +1331,6 @@ async def update_user_profile_endpoint(
 ):
     """Update user profile (name, phone, etc.)"""
     try:
-        # Filter out None values
         update_dict = {k: v for k, v in profile_data.model_dump().items() if v is not None}
 
         if not update_dict:

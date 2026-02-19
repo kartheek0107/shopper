@@ -94,6 +94,8 @@ async def update_connectivity_status(
 
         # Store device info if provided (only allowed keys)
         if device_info:
+            if hasattr(device_info, 'model_dump'):
+                device_info = device_info.model_dump()
             allowed_keys = {'os', 'model', 'app_version', 'manufacturer'}
             filtered_info = {k: v for k, v in device_info.items() if k in allowed_keys}
             if filtered_info:
