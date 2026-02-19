@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 # Get Firestore client
 db = firestore.client()
 
+VISIBILITY_PRIVATE = 0
+VISIBILITY_PUBLIC = 1
+VISIBILITY_SECRET = 2
+
 
 async def register_fcm_token(user_uid: str, fcm_token: str) -> Dict:
     """
@@ -117,7 +121,7 @@ async def send_notification(
                 sound='default',
                 channel_id=channel_id or 'new_delivery_requests',
                 color='#14B8A6',  # Teal color
-                visibility=messaging.Visibility.PUBLIC,
+                visibility=VISIBILITY_PUBLIC,
                 default_sound=True,
                 default_vibrate_timings=True,
                 default_light_settings=True

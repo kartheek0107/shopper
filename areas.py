@@ -219,10 +219,11 @@ async def get_reachable_users_count(
             if not _is_connection_fresh(last_check):
                 continue
 
-            current_area_val = user_data.get('current_area')
-
-            if not _should_include_user_area(current_area_val, area, include_nearby):
-                continue
+            # Only apply area filter when a specific area was requested
+            if area:
+                current_area_val = user_data.get('current_area')
+                if not _should_include_user_area(current_area_val, area, include_nearby):
+                    continue
 
             identifier = user_data.get('device_id')
             if not identifier or not identifier.strip():
@@ -246,10 +247,11 @@ async def get_reachable_users_count(
             if not _is_connection_fresh(last_check):
                 continue
 
-            current_area_val = user_data.get('current_area')
-
-            if not _should_include_user_area(current_area_val, area, include_nearby):
-                continue
+            # Only apply area filter when a specific area was requested
+            if area:
+                current_area_val = user_data.get('current_area')
+                if not _should_include_user_area(current_area_val, area, include_nearby):
+                    continue
 
             count += 1
 
