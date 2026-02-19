@@ -29,8 +29,8 @@ PREDEFINED_AREAS = [
 # ============================================
 _count_cache: Dict[str, Tuple[int, float]] = {}
 _count_cache_lock = asyncio.Lock()
-CACHE_TTL_SECONDS = 30  # Cache for 30 seconds
-STALE_CONNECTION_MINUTES = 10  # Consider connection stale after 10 minutes
+CACHE_TTL_SECONDS = 30
+STALE_CONNECTION_MINUTES = 10
 
 
 def _get_cache_key(area: Optional[str], count_by_device: bool, include_nearby: bool) -> str:
@@ -46,7 +46,6 @@ async def _get_cached_count(cache_key: str) -> Optional[int]:
             if time.time() - timestamp < CACHE_TTL_SECONDS:
                 return count
             else:
-                # Remove expired entry
                 del _count_cache[cache_key]
     return None
 
@@ -90,7 +89,6 @@ async def set_user_preferred_areas(user_uid: str, areas: List[str]) -> Dict:
             detail="At least one preferred area must be specified"
         )
 
-    # Validate all areas
     if not validate_areas(areas):
         invalid_areas = [a for a in areas if not validate_area(a)]
         raise HTTPException(
@@ -131,41 +129,47 @@ async def set_user_current_area(user_uid: str, area: Optional[str]) -> Dict:
     return user_doc.to_dict()
 
 
-def _is_connection_fresh(last_check: datetime) -> bool:
+def _is_connection_fresh(last_check) -> bool:
     """Check if connectivity check is recent enough"""
     if not last_check:
         return False
 
     # Handle timezone-naive datetime
-    if last_check.tzinfo is None:
-        # Assume UTC if no timezone
+    if hasattr(last_check, 'tzinfo') and last_check.tzinfo is None:
         from datetime import timezone
         last_check = last_check.replace(tzinfo=timezone.utc)
 
-    cutoff = datetime.utcnow().replace(tzinfo=last_check.tzinfo) - timedelta(minutes=STALE_CONNECTION_MINUTES)
-    return last_check >= cutoff
+    try:
+        cutoff = datetime.utcnow().replace(
+            tzinfo=last_check.tzinfo
+        ) - timedelta(minutes=STALE_CONNECTION_MINUTES)
+        return last_check >= cutoff
+    except Exception:
+        return False
 
 
-def _should_include_user_area(current_area: Optional[str], filter_area: Optional[str], include_nearby: bool) -> bool:
+def _should_include_user_area(
+    current_area: Optional[str],
+    filter_area: Optional[str],
+    include_nearby: bool
+) -> bool:
     """
-    Determine if user should be included based on area filtering
-
-    FIXED: Proper handling of _nearby areas
+    Determine if user should be included based on area filtering.
+    Handles _nearby suffix correctly.
     """
     if not current_area:
         return False
 
-    # Handle _nearby suffix
     is_nearby_area = current_area.endswith('_nearby')
 
     if is_nearby_area and not include_nearby:
         return False
 
-    # If no area filter, include all (except _nearby if disabled)
+    # No area filter → include all (respecting nearby flag above)
     if not filter_area:
         return True
 
-    # Extract base area from _nearby suffix
+    # Extract base area from _nearby suffix for comparison
     base_area = current_area.replace('_nearby', '') if is_nearby_area else current_area
 
     return base_area == filter_area
@@ -177,14 +181,7 @@ async def get_reachable_users_count(
     include_nearby: bool = True
 ) -> int:
     """
-    Get count of reachable users with caching, staleness check, and proper _nearby handling
-
-    FIXES:
-    - Added caching (30 second TTL)
-    - Added staleness check (10 minute timeout)
-    - Fixed _nearby area handling
-    - Added transaction-like snapshot using Firestore batch read
-    - Proper device_id fallback
+    Get count of reachable users with caching, staleness check, and _nearby handling.
 
     Args:
         area: Optional area filter (uses GPS-detected area)
@@ -194,53 +191,41 @@ async def get_reachable_users_count(
     Returns:
         int: Count of reachable users or unique devices
     """
-    # Input validation
     if area and not validate_area(area):
         raise HTTPException(
             status_code=400,
             detail=f"Invalid area: {area}. Valid areas: {PREDEFINED_AREAS}"
         )
 
-    # Check cache first
     cache_key = _get_cache_key(area, count_by_device, include_nearby)
     cached_count = await _get_cached_count(cache_key)
 
     if cached_count is not None:
         return cached_count
 
-    # Cache miss - compute count
     users_ref = db.collection('users')
-
-    # Use batch read for snapshot consistency
     query = users_ref.where(filter=firestore.FieldFilter('is_connected', '==', True))
 
     if count_by_device:
-        # Device-based counting with proper fallback
         unique_identifiers = set()
 
         for user_doc in query.stream():
             user_data = user_doc.to_dict()
 
-            # Check location permission
             if not user_data.get('location_permission_granted', False):
                 continue
 
-            # FIXED: Check connection staleness
             last_check = user_data.get('last_connectivity_check')
             if not _is_connection_fresh(last_check):
                 continue
 
-            # Get GPS-detected area
-            current_area = user_data.get('current_area')
+            current_area_val = user_data.get('current_area')
 
-            # FIXED: Proper _nearby handling
-            if not _should_include_user_area(current_area, area, include_nearby):
+            if not _should_include_user_area(current_area_val, area, include_nearby):
                 continue
 
-            # FIXED: Consistent fallback - always count something
             identifier = user_data.get('device_id')
-            if not identifier or identifier.strip() == '':
-                # Fallback to UID if device_id missing or empty
+            if not identifier or not identifier.strip():
                 identifier = user_data.get('uid')
 
             if identifier:
@@ -249,31 +234,25 @@ async def get_reachable_users_count(
         count = len(unique_identifiers)
 
     else:
-        # User-based counting
         count = 0
 
         for user_doc in query.stream():
             user_data = user_doc.to_dict()
 
-            # Check location permission
             if not user_data.get('location_permission_granted', False):
                 continue
 
-            # FIXED: Check connection staleness
             last_check = user_data.get('last_connectivity_check')
             if not _is_connection_fresh(last_check):
                 continue
 
-            # Get GPS-detected area
-            current_area = user_data.get('current_area')
+            current_area_val = user_data.get('current_area')
 
-            # FIXED: Proper _nearby handling
-            if not _should_include_user_area(current_area, area, include_nearby):
+            if not _should_include_user_area(current_area_val, area, include_nearby):
                 continue
 
             count += 1
 
-    # Store in cache
     await _set_cached_count(cache_key, count)
 
     return count
@@ -284,13 +263,7 @@ async def get_reachable_users_by_area(
     include_nearby: bool = True
 ) -> Dict[str, int]:
     """
-    Get count of reachable users grouped by GPS-detected area with caching
-
-    FIXES:
-    - Added caching
-    - Fixed _nearby handling
-    - Added staleness check
-    - Proper device_id fallback
+    Get count of reachable users grouped by GPS-detected area with caching.
 
     Args:
         count_by_device: If True, count unique devices per area
@@ -299,23 +272,12 @@ async def get_reachable_users_by_area(
     Returns:
         dict: Area name -> count mapping
     """
-    # Check cache
-    cache_key = _get_cache_key(None, count_by_device, include_nearby)
-    cached_result = await _get_cached_count(cache_key)
-
-    if cached_result is not None:
-        # Cache stores flattened count - need to recompute per-area
-        # For now, skip caching for this function (needs refactoring)
-        pass
-
     users_ref = db.collection('users')
     query = users_ref.where(filter=firestore.FieldFilter('is_connected', '==', True))
 
     if count_by_device:
-        # Device-based counting per area
         area_device_sets = {area: set() for area in PREDEFINED_AREAS}
 
-        # Add _nearby areas if included
         if include_nearby:
             for area in PREDEFINED_AREAS:
                 area_device_sets[f"{area}_nearby"] = set()
@@ -323,19 +285,15 @@ async def get_reachable_users_by_area(
         for user_doc in query.stream():
             user_data = user_doc.to_dict()
 
-            # Check reachability conditions
             if not user_data.get('location_permission_granted', False):
                 continue
 
-            # FIXED: Check staleness
             last_check = user_data.get('last_connectivity_check')
             if not _is_connection_fresh(last_check):
                 continue
 
-            # Get GPS-detected area
             current_area = user_data.get('current_area')
 
-            # FIXED: Handle _nearby properly
             if not current_area:
                 continue
 
@@ -343,15 +301,14 @@ async def get_reachable_users_by_area(
             if is_nearby and not include_nearby:
                 continue
 
-            # FIXED: Consistent device_id fallback
             identifier = user_data.get('device_id')
-            if not identifier or identifier.strip() == '':
+            if not identifier or not identifier.strip():
                 identifier = user_data.get('uid')
 
             if identifier and current_area in area_device_sets:
                 area_device_sets[current_area].add(identifier)
 
-        # Convert to counts and filter out empty _nearby areas
+        # Convert sets to counts, drop empty _nearby entries
         result = {}
         for area, devices in area_device_sets.items():
             count = len(devices)
@@ -361,7 +318,6 @@ async def get_reachable_users_by_area(
         return result
 
     else:
-        # User-based counting per area
         area_counts = {area: 0 for area in PREDEFINED_AREAS}
 
         if include_nearby:
@@ -371,19 +327,15 @@ async def get_reachable_users_by_area(
         for user_doc in query.stream():
             user_data = user_doc.to_dict()
 
-            # Check reachability
             if not user_data.get('location_permission_granted', False):
                 continue
 
-            # FIXED: Check staleness
             last_check = user_data.get('last_connectivity_check')
             if not _is_connection_fresh(last_check):
                 continue
 
-            # Get GPS-detected area
             current_area = user_data.get('current_area')
 
-            # FIXED: Handle _nearby
             if not current_area:
                 continue
 
@@ -394,7 +346,6 @@ async def get_reachable_users_by_area(
             if current_area in area_counts:
                 area_counts[current_area] += 1
 
-        # Filter out empty _nearby areas
         result = {area: count for area, count in area_counts.items()
                   if count > 0 or not area.endswith('_nearby')}
 
@@ -407,11 +358,9 @@ async def get_available_users(
     include_nearby: bool = True
 ) -> List[Dict]:
     """
-    Get list of available (reachable) users with filters
-
-    FIXED: Added staleness check and _nearby handling
+    Get list of available (reachable) users with filters.
+    Includes staleness check and _nearby handling.
     """
-    # Validate area
     if area and not validate_area(area):
         raise HTTPException(
             status_code=400,
@@ -426,28 +375,22 @@ async def get_available_users(
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
 
-        # Check location permission
         if not user_data.get('location_permission_granted', False):
             continue
 
-        # FIXED: Check staleness
         last_check = user_data.get('last_connectivity_check')
         if not _is_connection_fresh(last_check):
             continue
 
-        # Get GPS-detected area
         current_area = user_data.get('current_area')
         preferred_areas = user_data.get('preferred_areas', [])
 
-        # FIXED: Proper _nearby handling
         if not _should_include_user_area(current_area, area, include_nearby):
             continue
 
-        # Filter by preferred areas if required
         if preferred_areas_only and not preferred_areas:
             continue
 
-        # Include device info in response
         available_users.append({
             'uid': user_data.get('uid'),
             'email': user_data.get('email'),
@@ -468,7 +411,6 @@ async def get_requests_by_area(
     status: Optional[str] = None
 ) -> List[Dict]:
     """Get requests filtered by pickup/drop areas"""
-    # Validate areas
     if pickup_area and not validate_area(pickup_area):
         raise HTTPException(status_code=400, detail=f"Invalid pickup_area: {pickup_area}")
     if drop_area and not validate_area(drop_area):
@@ -476,28 +418,23 @@ async def get_requests_by_area(
 
     requests_ref = db.collection('requests')
 
-    # Start with base query
     if status:
         query = requests_ref.where(filter=firestore.FieldFilter('status', '==', status))
     else:
         query = requests_ref
 
-    # Get all and filter in memory
     requests = []
     for doc in query.stream():
         request_data = doc.to_dict()
 
-        # Filter by pickup area
         if pickup_area and request_data.get('pickup_area') != pickup_area:
             continue
 
-        # Filter by drop area
         if drop_area and request_data.get('drop_area') != drop_area:
             continue
 
         requests.append(request_data)
 
-    # Sort by creation time (newest first)
     requests.sort(key=lambda x: x.get('created_at', ''), reverse=True)
 
     return requests
@@ -505,11 +442,9 @@ async def get_requests_by_area(
 
 async def get_nearby_requests(user_uid: str, include_nearby: bool = True) -> List[Dict]:
     """
-    Get requests near user's GPS-detected area
-
-    FIXED: Proper _nearby handling
+    Get requests near user's GPS-detected area.
+    Properly handles _nearby areas.
     """
-    # Get user's GPS-detected area
     user_ref = db.collection('users').document(user_uid)
     user_doc = user_ref.get()
 
@@ -520,14 +455,11 @@ async def get_nearby_requests(user_uid: str, include_nearby: bool = True) -> Lis
     current_area = user_data.get('current_area')
     preferred_areas = user_data.get('preferred_areas', [])
 
-    # Combine current GPS area and preferred areas
     user_areas = set(preferred_areas)
 
-    # FIXED: Handle _nearby areas properly
     if current_area:
         if current_area.endswith('_nearby'):
             if include_nearby:
-                # Include both the _nearby area and the base area
                 base_area = current_area.replace('_nearby', '')
                 user_areas.add(base_area)
                 user_areas.add(current_area)
@@ -537,7 +469,6 @@ async def get_nearby_requests(user_uid: str, include_nearby: bool = True) -> Lis
     if not user_areas:
         return []
 
-    # Get open requests
     requests_ref = db.collection('requests')
     query = requests_ref.where(filter=firestore.FieldFilter('status', '==', 'open'))
 
@@ -545,18 +476,15 @@ async def get_nearby_requests(user_uid: str, include_nearby: bool = True) -> Lis
     for doc in query.stream():
         request_data = doc.to_dict()
 
-        # Skip own requests
         if request_data.get('posted_by') == user_uid:
             continue
 
         pickup_area = request_data.get('pickup_area')
         drop_area = request_data.get('drop_area')
 
-        # Check if request involves any of user's areas
         if pickup_area in user_areas or drop_area in user_areas:
             nearby_requests.append(request_data)
 
-    # Sort by creation time (newest first)
     nearby_requests.sort(key=lambda x: x.get('created_at', ''), reverse=True)
 
     return nearby_requests
@@ -564,9 +492,8 @@ async def get_nearby_requests(user_uid: str, include_nearby: bool = True) -> Lis
 
 async def get_area_device_analytics() -> Dict:
     """
-    Get analytics about device distribution across GPS-detected areas
-
-    FIXED: Added staleness check
+    Get analytics about device distribution across GPS-detected areas.
+    Includes staleness tracking.
     """
     users_ref = db.collection('users')
     query = users_ref.where(filter=firestore.FieldFilter('is_connected', '==', True))
@@ -581,18 +508,14 @@ async def get_area_device_analytics() -> Dict:
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
 
-        # Check location permission
         if not user_data.get('location_permission_granted', False):
             continue
 
-        # Check staleness
         last_check = user_data.get('last_connectivity_check')
         is_stale = not _is_connection_fresh(last_check)
 
-        # Get GPS-detected area
         current_area = user_data.get('current_area')
 
-        # Skip _nearby and unknown areas
         if not current_area or current_area.endswith('_nearby'):
             continue
 
@@ -609,7 +532,6 @@ async def get_area_device_analytics() -> Dict:
             else:
                 area_analytics[current_area]['stale_connections'] += 1
 
-    # Convert sets to counts
     result = {}
     for area, data in area_analytics.items():
         unique_count = len(data['unique_devices'])
@@ -625,5 +547,5 @@ async def get_area_device_analytics() -> Dict:
                 2
             )
         }
-    
+
     return result

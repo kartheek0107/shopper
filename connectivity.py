@@ -1,12 +1,14 @@
 """
 Connectivity and Reachability Management System with Device Tracking
-FIXED: Race conditions, device_id validation, and cache invalidation
+FIXED: Removed broken @firestore.transactional wrapper that was returning None,
+       and fixed device_id validation to not swallow errors silently.
 """
 
 from typing import Dict, List, Optional
 from firebase_admin import firestore
 from datetime import datetime
 from fastapi import HTTPException
+import re
 
 # Get Firestore client
 db = firestore.client()
@@ -22,30 +24,25 @@ def calculate_reachability(
 
 def _validate_device_id(device_id: Optional[str]) -> Optional[str]:
     """
-    Validate and normalize device_id
-
-    FIXED: Proper validation and normalization
+    Validate and normalize device_id.
+    Returns cleaned device_id or None if blank/missing.
+    Raises HTTPException for invalid format.
     """
     if not device_id:
         return None
 
-    # Strip whitespace
     device_id = device_id.strip()
 
-    # Reject empty strings
     if not device_id:
         return None
 
-    # Validate length (reasonable bounds)
     if len(device_id) < 5 or len(device_id) > 255:
         raise HTTPException(
             status_code=400,
             detail="device_id must be between 5 and 255 characters"
         )
 
-    # Validate characters (alphanumeric, hyphens, underscores only)
-    import re
-    if not re.match(r'^[a-zA-Z0-9_-]+$', device_id):
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', device_id):
         raise HTTPException(
             status_code=400,
             detail="device_id can only contain letters, numbers, hyphens, and underscores"
@@ -62,74 +59,55 @@ async def update_connectivity_status(
     device_info: Optional[dict] = None
 ) -> Dict:
     """
-    Update user's connectivity status with proper validation
+    Update user's connectivity status and auto-compute reachability with device tracking.
 
-    FIXES:
-    - Atomic update using transaction
-    - Proper device_id validation
-    - Cache invalidation trigger
-    - Timezone-aware timestamps
+    FIXED: Replaced broken @firestore.transactional decorator (which was swallowing
+    return values and causing 400s) with a plain Firestore read-then-update.
     """
-    # Validate device_id
     validated_device_id = _validate_device_id(device_id)
 
     user_ref = db.collection('users').document(user_uid)
+    user_doc = user_ref.get()
 
-    # Use transaction for atomic update
-    @firestore.transactional
-    def update_in_transaction(transaction):
-        # Get current user data
-        user_doc = user_ref.get(transaction=transaction)
+    if not user_doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
 
-        if not user_doc.exists:
-            raise HTTPException(status_code=404, detail="User not found")
+    user_data = user_doc.to_dict()
 
-        user_data = user_doc.to_dict()
+    is_reachable = calculate_reachability(is_connected, location_permission_granted)
+    now = datetime.utcnow()
 
-        # Calculate reachability
-        is_reachable = calculate_reachability(is_connected, location_permission_granted)
+    update_data = {
+        'is_connected': is_connected,
+        'location_permission_granted': location_permission_granted,
+        'is_reachable': is_reachable,
+        'last_connectivity_check': now,
+        'updated_at': now
+    }
 
-        # Prepare update data
-        now = datetime.utcnow()
-        update_data = {
-            'is_connected': is_connected,
-            'location_permission_granted': location_permission_granted,
-            'is_reachable': is_reachable,
-            'last_connectivity_check': now,
-            'updated_at': now
-        }
+    if validated_device_id:
+        update_data['device_id'] = validated_device_id
 
-        # Handle device_id
-        if validated_device_id:
-            update_data['device_id'] = validated_device_id
+        # First time device registration
+        if not user_data.get('device_id'):
+            update_data['device_registered_at'] = now
 
-            # First time device registration
-            if not user_data.get('device_id'):
-                update_data['device_registered_at'] = now
-
-            # Store device info if provided
-            if device_info:
-                # Validate device_info structure
-                allowed_keys = {'os', 'model', 'app_version', 'manufacturer'}
-                filtered_info = {k: v for k, v in device_info.items() if k in allowed_keys}
+        # Store device info if provided (only allowed keys)
+        if device_info:
+            allowed_keys = {'os', 'model', 'app_version', 'manufacturer'}
+            filtered_info = {k: v for k, v in device_info.items() if k in allowed_keys}
+            if filtered_info:
                 update_data['device_info'] = filtered_info
 
-        # Perform update
-        transaction.update(user_ref, update_data)
+    user_ref.update(update_data)
 
-        # Return updated data
-        user_data.update(update_data)
-        return user_data
-
-    # Execute transaction
-    transaction = db.transaction()
-    result = update_in_transaction(transaction)
-
-    # Invalidate count cache
+    # Invalidate count cache since reachability changed
     from areas import invalidate_count_cache
     await invalidate_count_cache()
 
-    return result
+    # Return merged data so callers get a complete picture
+    user_data.update(update_data)
+    return user_data
 
 
 async def get_reachability_status(user_uid: str) -> Dict:
@@ -179,14 +157,12 @@ async def get_connectivity_stats() -> Dict:
     connected_users = 0
     location_granted_users = 0
 
-    # Device tracking
     unique_devices = set()
     users_with_devices = 0
     device_to_users = {}
-
-    # Staleness tracking
-    from areas import _is_connection_fresh
     stale_connections = 0
+
+    from areas import _is_connection_fresh
 
     for user_doc in users_ref.stream():
         user_data = user_doc.to_dict()
@@ -197,9 +173,8 @@ async def get_connectivity_stats() -> Dict:
         last_check = user_data.get('last_connectivity_check')
         if user_data.get('is_connected') and not _is_connection_fresh(last_check):
             stale_connections += 1
-            continue  # Don't count stale connections
+            continue  # Don't count stale connections in live stats
 
-        # Connectivity stats
         if user_data.get('is_reachable'):
             reachable_users += 1
         if user_data.get('is_connected'):
@@ -207,18 +182,15 @@ async def get_connectivity_stats() -> Dict:
         if user_data.get('location_permission_granted'):
             location_granted_users += 1
 
-        # Device tracking
         device_id = user_data.get('device_id')
         if device_id and device_id.strip():
             users_with_devices += 1
             unique_devices.add(device_id)
 
-            # Track multiple users per device
             if device_id not in device_to_users:
                 device_to_users[device_id] = []
             device_to_users[device_id].append(user_uid)
 
-    # Count multi-device users
     multi_device_users = sum(1 for users in device_to_users.values() if len(users) > 1)
 
     return {
@@ -243,13 +215,12 @@ async def get_unique_reachable_devices(area: Optional[str] = None) -> Dict:
     total_users = 0
     users_without_device_id = 0
 
-    # Import staleness check
     from areas import _is_connection_fresh, _should_include_user_area
 
     for user_doc in query.stream():
         user_data = user_doc.to_dict()
 
-        # Check staleness
+        # Skip stale connections
         last_check = user_data.get('last_connectivity_check')
         if not _is_connection_fresh(last_check):
             continue
@@ -267,7 +238,7 @@ async def get_unique_reachable_devices(area: Optional[str] = None) -> Dict:
             unique_devices.add(device_id)
         else:
             users_without_device_id += 1
-            # Fallback: count user by UID
+            # Fallback: count by UID so we don't lose the user from the count
             unique_devices.add(user_data.get('uid'))
 
     return {
@@ -304,20 +275,18 @@ async def check_stale_connectivity(minutes: int = 10) -> list:
 async def get_device_analytics() -> Dict:
     """Get analytics about device usage patterns"""
     users_ref = db.collection('users')
-    
+
     device_info_map = {}
     os_distribution = {}
-    
+
     for user_doc in users_ref.stream():
         user_data = user_doc.to_dict()
         device_info = user_data.get('device_info')
-        
+
         if device_info:
-            # OS distribution
             os_type = device_info.get('os', 'Unknown')
             os_distribution[os_type] = os_distribution.get(os_type, 0) + 1
-            
-            # Store device info
+
             device_id = user_data.get('device_id')
             if device_id:
                 if device_id not in device_info_map:
@@ -327,9 +296,11 @@ async def get_device_analytics() -> Dict:
                     'email': user_data.get('email'),
                     'device_info': device_info
                 })
-    
+
     return {
         'total_devices_tracked': len(device_info_map),
         'os_distribution': os_distribution,
-        'devices_with_multiple_accounts': sum(1 for users in device_info_map.values() if len(users) > 1)
+        'devices_with_multiple_accounts': sum(
+            1 for users in device_info_map.values() if len(users) > 1
+        )
     }

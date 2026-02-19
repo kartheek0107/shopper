@@ -33,7 +33,7 @@ class UpdateConnectivityModel(BaseModel):
         description="Unique device identifier",
         max_length=255
     )
-    device_info: Optional[DeviceInfo] = Field(  # ✅ Uses DeviceInfo model
+    device_info: Optional[DeviceInfo] = Field(
         None,
         description="Optional device metadata"
     )
@@ -43,17 +43,18 @@ class UpdateConnectivityModel(BaseModel):
     def validate_device_id(cls, v):
         """Validate device_id format"""
         if v is not None:
-            # Strip whitespace
             v = v.strip()
-            if not v or len(v) < 5:
-                raise None
+            if not v:
+                return None  # treat empty string as None
+            if len(v) < 5:
+                raise ValueError('device_id must be at least 5 characters')
         return v
 
 
 class SetPreferredAreasModel(BaseModel):
     """Model for setting preferred areas"""
     preferred_areas: List[str] = Field(
-        ..., 
+        ...,
         min_length=1,
         description="List of preferred operating areas"
     )
@@ -76,25 +77,25 @@ class UserProfileResponse(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     email_verified: bool
-    
+
     # Area preferences
     preferred_areas: Optional[List[str]] = []
     current_area: Optional[str] = None
-    
+
     # Connectivity & Reachability
     is_reachable: bool = False
     is_connected: bool = False
     location_permission_granted: bool = False
     last_connectivity_check: Optional[datetime] = None
-    
-    # Device tracking (NEW)
+
+    # Device tracking
     device_id: Optional[str] = None
     device_info: Optional[dict] = None
     device_registered_at: Optional[datetime] = None
-    
+
     # FCM
     fcm_token: Optional[str] = None
-    
+
     # Timestamps
     created_at: datetime
     last_login: datetime
@@ -117,11 +118,11 @@ class CreateRequestModel(BaseModel):
     pickup_area: str = Field(..., description="Pickup area")
     drop_location: str = Field(..., min_length=1, max_length=500)
     drop_area: str = Field(..., description="Drop area")
-    
+
     reward: Optional[float] = Field(None, description="Optional reward (auto-calculated if not provided)")
     item_price: float = Field(..., gt=0, description="Total item price (must be positive)")
     time_requested: Optional[datetime] = Field(None, description="When the delivery is needed (optional)")
-    
+
     notes: Optional[str] = Field(None, max_length=1000, description="Additional notes")
     deadline: datetime = Field(..., description="Deadline for request completion")
     priority: bool = Field(default=False, description="Whether the request is high priority")
@@ -137,37 +138,34 @@ class CreateRequestModel(BaseModel):
             if len(item) > 200:
                 raise ValueError('Each item must be less than 200 characters')
         return v
-    
+
     @field_validator('reward')
     @classmethod
     def validate_reward(cls, v):
         if v is not None and v <= 0:
             raise ValueError('reward must be positive if provided')
         return v
-    
+
     @field_validator('time_requested')
     @classmethod
     def time_must_be_future(cls, v):
         if v is None:
             return v
-        
         now = datetime.now(timezone.utc)
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
         if v <= now:
             raise ValueError('time_requested must be in the future')
         return v
-    
+
     @field_validator('deadline')
     @classmethod
     def deadline_must_be_future(cls, v):
         now = datetime.now(timezone.utc)
         if v.tzinfo is None:
             v = v.replace(tzinfo=timezone.utc)
-        
         if v <= now:
             raise ValueError('deadline must be in the future')
-        
         return v
 
 
@@ -195,7 +193,7 @@ class RequestResponse(BaseModel):
     created_at: datetime
     notes: Optional[str] = None
     deadline: datetime
-    priority: bool 
+    priority: bool
     is_expired: bool = False
 
 
@@ -243,7 +241,8 @@ class ReachabilityStatusResponse(BaseModel):
     location_permission_granted: bool
     last_connectivity_check: Optional[datetime]
     message: str
-    device_id: Optional[str] = None  # NEW: Include device_id in response
+    device_id: Optional[str] = None
+    device_info: Optional[dict] = None
 
 
 class AreaCountResponse(BaseModel):
@@ -258,8 +257,10 @@ class ConnectivityStatsResponse(BaseModel):
     connected_users: int
     location_granted_users: int
     reachable_percentage: float
-    unique_devices: int = Field(0, description="Number of unique devices")  # NEW
-    multi_device_users: int = Field(0, description="Users with multiple devices")  # NEW
+    stale_connections: int = Field(0, description="Connections not updated recently")
+    unique_devices: int = Field(0, description="Number of unique devices")
+    users_with_devices: int = Field(0, description="Users with device_id registered")
+    multi_device_users: int = Field(0, description="Users with multiple devices")
 
 
 class EnhancedDashboardResponse(BaseModel):
