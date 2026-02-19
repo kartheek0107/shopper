@@ -5,9 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="5daab1b9-91a7-494d-b5ef-7a4ad505bef4" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/areas.py" beforeDir="false" afterPath="$PROJECT_DIR$/areas.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/connectivity.py" beforeDir="false" afterPath="$PROJECT_DIR$/connectivity.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/models.py" beforeDir="false" afterPath="$PROJECT_DIR$/models.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -28,10 +27,13 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
     "RunOnceActivity.git.unshallow": "true",
     "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
     "git-widget-placeholder": "master",
     "junie.onboarding.icon.badge.shown": "true",
+    "node.js.detected.package.eslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
     "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
     "to.speed.mode.migration.done": "true",
@@ -54,7 +56,7 @@
       <option name="presentableId" value="Default" />
       <updated>1771397422170</updated>
       <workItem from="1771397425018" duration="61000" />
-      <workItem from="1771474746967" duration="152000" />
+      <workItem from="1771474746967" duration="1001000" />
     </task>
     <servers />
   </component>

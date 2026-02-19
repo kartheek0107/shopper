@@ -228,8 +228,8 @@ async def update_connectivity_endpoint(
             user_uid=current_user["uid"],
             is_connected=data.is_connected,
             location_permission_granted=data.location_permission_granted,
-            device_id=data.device_id,  # NEW
-            device_info=data.device_info  # NEW
+            device_id=data.device_id,
+            device_info=data.device_info.model_dump() if data.device_info else None
         )
 
         return {
@@ -1043,7 +1043,7 @@ async def create_request_endpoint(
     Sends premium notifications to users in the pickup/drop areas.
     """
     try:
-        request_dict = request_data.dict()
+        request_dict = request_data.model_dump()
         created_request = await create_request(
             user_uid=current_user["uid"],
             user_email=current_user["email"],
@@ -1332,7 +1332,7 @@ async def update_user_profile_endpoint(
     """Update user profile (name, phone, etc.)"""
     try:
         # Filter out None values
-        update_dict = {k: v for k, v in profile_data.dict().items() if v is not None}
+        update_dict = {k: v for k, v in profile_data.model_dump().items() if v is not None}
 
         if not update_dict:
             raise HTTPException(status_code=400, detail="No data to update")
