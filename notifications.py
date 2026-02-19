@@ -7,6 +7,7 @@ from typing import Optional, Dict, List
 from firebase_admin import messaging, firestore
 from datetime import datetime
 from fastapi import HTTPException
+import asyncio
 import logging
 
 # Setup logging
@@ -24,22 +25,22 @@ VISIBILITY_SECRET = "secret"
 async def register_fcm_token(user_uid: str, fcm_token: str) -> Dict:
     """
     Register or update FCM token for a user
-    
+
     Args:
         user_uid: User UID
         fcm_token: Firebase Cloud Messaging token
-        
+
     Returns:
         dict: Success response
     """
     user_ref = db.collection('users').document(user_uid)
-    
+
     user_ref.update({
         'fcm_token': fcm_token,
         'fcm_token_updated_at': datetime.utcnow(),
         'updated_at': datetime.utcnow()
     })
-    
+
     logger.info(f"✅ FCM token registered for user {user_uid}")
 
     return {
@@ -139,8 +140,9 @@ async def send_notification(
             android=android_config
         )
 
-        # Send message
-        response = messaging.send(message)
+        # Send message via thread executor to avoid blocking the async event loop
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, messaging.send, message)
         logger.info(f"✅ Notification sent to {user_uid}: {response}")
 
         return True
