@@ -21,6 +21,18 @@ VISIBILITY_PRIVATE = "private"
 VISIBILITY_PUBLIC = "public"
 VISIBILITY_SECRET = "secret"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX: Channel IDs must match the _v2 constants in FCMService.kt / NotificationManager.kt.
+#
+# Android channel importance is WRITE-ONCE per device. The original IDs were
+# registered on test devices with IMPORTANCE_DEFAULT, which permanently blocks
+# heads-up banners on those devices. Bumping to _v2 forces Android to treat them
+# as brand-new channels and respect IMPORTANCE_HIGH from the first registration.
+# ─────────────────────────────────────────────────────────────────────────────
+CHANNEL_NEW_REQUESTS = "new_delivery_requests_v2"
+CHANNEL_ORDER_UPDATES = "order_updates_v2"
+CHANNEL_GENERAL = "general_notifications_v2"
+
 
 async def register_fcm_token(user_uid: str, fcm_token: str) -> Dict:
     """
@@ -96,14 +108,13 @@ async def send_notification(
     channel_id: Optional[str] = None
 ) -> bool:
     """
-    Send premium push notification to a user
+    Send push notification to a user.
 
     Args:
         user_uid: User UID to send notification to
         title: Notification title
         body: Notification body (uses NAME not email!)
         data: Additional data payload
-        priority: Notification priority ("high" or "normal")
         channel_id: Android notification channel ID
 
     Returns:
@@ -116,31 +127,50 @@ async def send_notification(
         return False
 
     try:
-        # Build Android-specific config for premium experience
+        # ─────────────────────────────────────────────────────────────────
+        # FIX: DATA-ONLY PAYLOAD — no notification block anywhere.
+        #
+        # The original code had TWO notification blocks:
+        #   1. messaging.Notification(title=..., body=...) at the top level
+        #   2. messaging.AndroidNotification(...) inside AndroidConfig
+        #
+        # When FCM receives a message with ANY notification block and the app
+        # is in the background, Google's Firebase SDK intercepts it and
+        # displays it directly using whatever the system default channel is —
+        # completely bypassing onMessageReceived() and all our custom
+        # IMPORTANCE_HIGH channel logic. The result: silent, uncategorised
+        # notifications that never show as heads-up banners.
+        #
+        # Fix: remove BOTH notification blocks entirely. Put title + body
+        # inside the `data` dict instead. The Android app's FCMService reads
+        # them from data["title"] and data["body"] in onMessageReceived().
+        # priority='high' in AndroidConfig is the FCM transport priority —
+        # it wakes the device up to deliver the message immediately.
+        # ─────────────────────────────────────────────────────────────────
+
+        # Merge title + body into the data payload so onMessageReceived gets them
+        full_data = {
+            'title': title,
+            'body': body,
+            **(data or {})
+        }
+
+        # Ensure all values are strings — FCM data payload only accepts str
+        full_data = {k: str(v) for k, v in full_data.items() if v is not None}
+
         android_config = messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(
-                sound='default',
-                channel_id=channel_id or 'new_delivery_requests',
-                color='#14B8A6',  # Teal color
-                visibility=VISIBILITY_PUBLIC,
-                default_sound=True,
-                default_vibrate_timings=True,
-                default_light_settings=True
-            )
+            priority='high',          # FCM transport priority: wakes device immediately
+            # NO notification= block here — that was the bug
         )
 
-        # Create notification message
         message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body
-            ),
-            data=data or {},
+            # NO notification= block here — that was the bug
+            data=full_data,
             token=fcm_token,
             android=android_config
         )
 
-        # Send message via thread executor to avoid blocking the async event loop
+        # Run in executor to avoid blocking the async event loop
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(None, messaging.send, message)
         logger.info(f"✅ Notification sent to {user_uid}: {response}")
@@ -149,7 +179,6 @@ async def send_notification(
 
     except messaging.UnregisteredError:
         logger.warning(f"⚠️ FCM token invalid for user {user_uid}, removing token")
-        # Remove invalid token
         user_ref = db.collection('users').document(user_uid)
         user_ref.update({'fcm_token': firestore.DELETE_FIELD})
         return False
@@ -166,8 +195,8 @@ async def send_request_accepted_notification(
     request_id: str
 ) -> bool:
     """
-    Notify poster that their request was accepted
-    Uses acceptor's NAME instead of email
+    Notify poster that their request was accepted.
+    Uses acceptor's NAME instead of email.
 
     Args:
         poster_uid: UID of request poster
@@ -178,7 +207,6 @@ async def send_request_accepted_notification(
     Returns:
         bool: True if sent successfully
     """
-    # Get acceptor's NAME (not email!)
     acceptor_info = await get_user_info(acceptor_uid)
     if not acceptor_info:
         logger.error(f"❌ Could not find acceptor info for {acceptor_uid}")
@@ -186,9 +214,8 @@ async def send_request_accepted_notification(
 
     acceptor_name = acceptor_info.get('name', acceptor_info.get('email', 'Someone'))
 
-    # Create rich notification
     title = "🎉 Request Accepted!"
-    items_text = ", ".join(item[:2])  # Show first 2 items
+    items_text = ", ".join(item[:2])
     if len(item) > 2:
         items_text += f" +{len(item) - 2} more"
 
@@ -210,7 +237,7 @@ async def send_request_accepted_notification(
         title,
         body,
         data,
-        channel_id="order_updates"
+        channel_id=CHANNEL_ORDER_UPDATES
     )
 
 
@@ -221,8 +248,8 @@ async def send_delivery_completed_notification(
     request_id: str
 ) -> bool:
     """
-    Notify poster that delivery is completed
-    Uses deliverer's NAME instead of email
+    Notify poster that delivery is completed.
+    Uses deliverer's NAME instead of email.
 
     Args:
         poster_uid: UID of request poster
@@ -233,7 +260,6 @@ async def send_delivery_completed_notification(
     Returns:
         bool: True if sent successfully
     """
-    # Get deliverer's NAME (not email!)
     deliverer_info = await get_user_info(deliverer_uid)
     if not deliverer_info:
         logger.error(f"❌ Could not find deliverer info for {deliverer_uid}")
@@ -241,7 +267,6 @@ async def send_delivery_completed_notification(
 
     deliverer_name = deliverer_info.get('name', deliverer_info.get('email', 'Someone'))
 
-    # Create rich notification
     title = "✅ Delivery Completed!"
     items_text = ", ".join(item[:2])
     if len(item) > 2:
@@ -265,104 +290,9 @@ async def send_delivery_completed_notification(
         title,
         body,
         data,
-        channel_id="order_updates"
+        channel_id=CHANNEL_ORDER_UPDATES
     )
 
-
-async def send_new_request_in_area_notification(
-    area: str,
-    item: List[str],
-    request_id: str,
-    exclude_uid: str,
-    poster_uid: Optional[str] = None,
-    pickup_area: Optional[str] = None,
-    drop_area: Optional[str] = None,
-    reward: Optional[int] = None,
-    deadline: Optional[str] = None
-) -> int:
-    """
-    PREMIUM: Notify ALL REACHABLE users about new delivery request
-    Uses POSTER'S NAME, rich content
-
-    Args:
-        area: Area where request is posted (for backward compatibility)
-        item: List of items to deliver
-        request_id: Request ID
-        exclude_uid: UID to exclude (poster)
-        poster_uid: UID of request poster (optional, for getting name)
-        pickup_area: Pickup location area (optional)
-        drop_area: Drop location area (optional)
-        reward: Reward amount (optional)
-        deadline: Optional deadline
-
-    Returns:
-        int: Number of notifications sent
-    """
-    # Get poster's NAME (not email!)
-    poster_name = 'Someone'
-    if poster_uid:
-        poster_info = await get_user_info(poster_uid)
-        if poster_info:
-            poster_name = poster_info.get('name', 'Someone')
-
-    # Use provided areas or fallback to area parameter
-    target_pickup = pickup_area or area
-    target_drop = drop_area or area
-
-    # Get all reachable users (NO AREA FILTERING)
-    users_ref = db.collection('users')
-    query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
-
-    # Create premium notification content
-    title = "🛒 New Delivery Request"
-    items_text = ", ".join(item[:2])
-    if len(item) > 2:
-        items_text += f" +{len(item) - 2} more"
-
-    # Use NAME not email!
-    body = f"{poster_name} needs delivery from {target_pickup}"
-
-    # Rich data payload for Android app
-    data = {
-        'type': 'new_request',
-        'title': title,
-        'body': body,
-        'order_id': request_id,
-        'request_id': request_id,
-        'poster_name': poster_name,
-        'pickup_area': target_pickup,
-        'drop_area': target_drop,
-        'items': ', '.join(item),
-        'reward': str(reward) if reward else '',
-        'deadline': deadline or ''
-    }
-
-    sent_count = 0
-
-    # ✅ NOTIFY ALL REACHABLE USERS (removed area filtering)
-    for user_doc in query.stream():
-        user_data = user_doc.to_dict()
-        user_uid = user_data.get('uid')
-
-        # Skip poster themselves
-        if user_uid == exclude_uid:
-            continue
-
-        # ✅ REMOVED: Area filtering - now everyone gets notified!
-        # Send HIGH PRIORITY notification
-        if await send_notification(
-            user_uid,
-            title,
-            body,
-            data,
-            channel_id="new_delivery_requests"
-        ):
-            sent_count += 1
-
-    logger.info(f"✅ Sent {sent_count} notifications to ALL reachable users")
-    logger.info(f"📦 Request: {target_pickup} → {target_drop} | Items: {items_text} | 💰 Reward: ₹{reward if reward else 'N/A'}")
-
-    return sent_count
 
 async def send_request_cancelled_notification(
     acceptor_uid: str,
@@ -371,8 +301,8 @@ async def send_request_cancelled_notification(
     request_id: str
 ) -> bool:
     """
-    Notify acceptor that request was cancelled
-    Uses poster's NAME instead of email
+    Notify acceptor that request was cancelled.
+    Uses poster's NAME instead of email.
 
     Args:
         acceptor_uid: UID of acceptor
@@ -383,7 +313,6 @@ async def send_request_cancelled_notification(
     Returns:
         bool: True if sent successfully
     """
-    # Get poster's NAME (not email!)
     poster_info = await get_user_info(poster_uid)
     if not poster_info:
         logger.error(f"❌ Could not find poster info for {poster_uid}")
@@ -391,7 +320,6 @@ async def send_request_cancelled_notification(
 
     poster_name = poster_info.get('name', poster_info.get('email', 'Someone'))
 
-    # Create notification
     title = "❌ Request Cancelled"
     items_text = ", ".join(item[:2])
     if len(item) > 2:
@@ -415,8 +343,96 @@ async def send_request_cancelled_notification(
         title,
         body,
         data,
-        channel_id="order_updates"
+        channel_id=CHANNEL_ORDER_UPDATES
     )
+
+
+async def send_new_request_in_area_notification(
+    area: str,
+    item: List[str],
+    request_id: str,
+    exclude_uid: str,
+    poster_uid: Optional[str] = None,
+    pickup_area: Optional[str] = None,
+    drop_area: Optional[str] = None,
+    reward: Optional[int] = None,
+    deadline: Optional[str] = None
+) -> int:
+    """
+    Notify ALL REACHABLE users about a new delivery request.
+    Uses poster's NAME, rich content.
+
+    Args:
+        area: Area where request is posted (backward compatibility)
+        item: List of items to deliver
+        request_id: Request ID
+        exclude_uid: UID to exclude (the poster themselves)
+        poster_uid: UID of request poster (for getting name)
+        pickup_area: Pickup location area
+        drop_area: Drop location area
+        reward: Reward amount
+        deadline: Optional deadline string
+
+    Returns:
+        int: Number of notifications sent
+    """
+    poster_name = 'Someone'
+    if poster_uid:
+        poster_info = await get_user_info(poster_uid)
+        if poster_info:
+            poster_name = poster_info.get('name', 'Someone')
+
+    target_pickup = pickup_area or area
+    target_drop = drop_area or area
+
+    # Query all reachable users — no area filtering
+    users_ref = db.collection('users')
+    query = users_ref.where(filter=firestore.FieldFilter('is_reachable', '==', True))
+
+    title = "🛒 New Delivery Request"
+    items_text = ", ".join(item[:2])
+    if len(item) > 2:
+        items_text += f" +{len(item) - 2} more"
+
+    body = f"{poster_name} needs delivery from {target_pickup}"
+
+    data = {
+        'type': 'new_request',
+        'title': title,
+        'body': body,
+        'order_id': request_id,
+        'request_id': request_id,
+        'poster_name': poster_name,
+        'pickup_area': target_pickup,
+        'drop_area': target_drop,
+        'items': ', '.join(item),
+        'reward': str(reward) if reward else '',
+        'deadline': deadline or ''
+    }
+
+    sent_count = 0
+
+    for user_doc in query.stream():
+        user_data = user_doc.to_dict()
+        user_uid = user_data.get('uid')
+
+        # Skip the poster themselves
+        if user_uid == exclude_uid:
+            continue
+
+        if await send_notification(
+            user_uid,
+            title,
+            body,
+            data,
+            channel_id=CHANNEL_NEW_REQUESTS
+        ):
+            sent_count += 1
+
+    logger.info(f"✅ Sent {sent_count} notifications to ALL reachable users")
+    logger.info(f"📦 Request: {target_pickup} → {target_drop} | Items: {items_text} | 💰 Reward: ₹{reward if reward else 'N/A'}")
+
+    return sent_count
 
 
 async def send_bulk_notification(
@@ -426,14 +442,13 @@ async def send_bulk_notification(
     data: Optional[Dict] = None,
 ) -> Dict:
     """
-    Send premium notification to multiple users
+    Send notification to multiple users.
 
     Args:
         user_uids: List of user UIDs
         title: Notification title
         body: Notification body
         data: Optional data payload
-        priority: Notification priority
 
     Returns:
         dict: Statistics about sent notifications
@@ -458,7 +473,7 @@ async def send_bulk_notification(
 
 async def remove_fcm_token(user_uid: str) -> Dict:
     """
-    Remove FCM token for a user (on logout)
+    Remove FCM token for a user (on logout).
 
     Args:
         user_uid: User UID
@@ -474,7 +489,7 @@ async def remove_fcm_token(user_uid: str) -> Dict:
     })
 
     logger.info(f"✅ FCM token removed for user {user_uid}")
-    
+
     return {
         'success': True,
         'message': 'FCM token removed successfully'
