@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import EmailStr
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from firebase_admin import firestore
 import math
 from contextlib import asynccontextmanager
 from config import settings
@@ -11,15 +10,12 @@ from auth import get_current_user, verify_email_domain
 from scheduler import cleanup_expired_requests_job
 from database import mark_expired_requests
 import asyncio
-from datetime import datetime
-from collections import defaultdict
-from datetime import datetime, timedelta
-import asyncio
+from datetime import timedelta
 
-_rate_limit_storage = defaultdict(lambda: {'count': 0, 'reset_time': datetime.utcnow()})
-_rate_limit_lock = asyncio.Lock()
+from firestore_async import get_db, utcnow, get_doc, build_query, stream_query
 
-db = firestore.client()
+# Redis-backed rate limiter (replaces in-process defaultdict)
+from redis_cache import check_rate_limit as rate_limit
 
 from location_service import (
     update_user_location,
@@ -76,7 +72,7 @@ from ratings import (
 async def lifespan(app: FastAPI):
     # Startup: Start background tasks
     cleanup_task = asyncio.create_task(cleanup_expired_requests_job())
-    print("✅ Started background cleanup job")
+    print("✅ Started background jobs")
 
     yield  # Application is running
 
@@ -85,7 +81,8 @@ async def lifespan(app: FastAPI):
     try:
         await cleanup_task
     except asyncio.CancelledError:
-        print("🛑 Background cleanup job stopped")
+        pass
+    print("🛑 Background jobs stopped")
 
 
 # Initialize FastAPI app
@@ -105,40 +102,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-async def rate_limit(key: str, max_requests: int = 1, window_seconds: int = 10) -> bool:
-    """
-    Rate limiting decorator
-
-    Args:
-        key: Unique identifier (e.g., user_uid)
-        max_requests: Maximum requests allowed in window
-        window_seconds: Time window in seconds
-
-    Returns:
-        True if allowed, raises HTTPException if rate limited
-    """
-    async with _rate_limit_lock:
-        now = datetime.utcnow()
-        rate_data = _rate_limit_storage[key]
-
-        # Reset if window expired
-        if now >= rate_data['reset_time']:
-            rate_data['count'] = 0
-            rate_data['reset_time'] = now + timedelta(seconds=window_seconds)
-
-        # Check limit
-        if rate_data['count'] >= max_requests:
-            retry_after = (rate_data['reset_time'] - now).total_seconds()
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded. Try again in {int(retry_after)} seconds.",
-                headers={"Retry-After": str(int(retry_after))}
-            )
-
-        # Increment counter
-        rate_data['count'] += 1
-        return True
 
 
 # ============================================
@@ -162,6 +125,44 @@ async def root():
             "Real-time User Availability",
             "Deliverer Rating System"
         ]
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Deep health check — verifies Firestore connectivity.
+    Unauthenticated (for load balancer / k8s probes).
+    """
+    try:
+        db = get_db()
+        # Lightweight read to verify Firestore is reachable
+        await asyncio.to_thread(lambda: db.collection('users').limit(1).get())
+        firestore_ok = True
+    except Exception as e:
+        firestore_ok = False
+
+    # Check Redis connectivity
+    try:
+        from redis_cache import _get_redis
+        redis = _get_redis()
+        if redis:
+            await redis.ping()
+            redis_ok = True
+        else:
+            redis_ok = False
+    except Exception:
+        redis_ok = False
+
+    status = "ok" if firestore_ok else "degraded"
+
+    return {
+        "status": status,
+        "version": settings.API_VERSION,
+        "services": {
+            "firestore": "ok" if firestore_ok else "unreachable",
+            "redis": "ok" if redis_ok else "unreachable",
+        }
     }
 
 
@@ -408,13 +409,11 @@ async def get_my_gps_location_endpoint(
         current_user: dict = Depends(get_current_user)
 ):
     """Get current user's stored GPS location with area info"""
-    user_ref = db.collection('users').document(current_user["uid"])
-    user_doc = user_ref.get()
+    user_data = await get_doc('users', current_user["uid"])
 
-    if not user_doc.exists:
+    if not user_data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user_data = user_doc.to_dict()
     gps_location = user_data.get('gps_location')
 
     if not gps_location:
@@ -526,21 +525,16 @@ async def get_nearby_requests_by_gps_endpoint(
         current_user: dict = Depends(get_current_user)
 ):
     """
-    Get requests near user's current GPS location
-
+    Get requests near user's current GPS location.
     More accurate than area-based filtering.
     Requires user to have GPS location stored.
     """
-    # Get user's GPS location
-    user_ref = db.collection('users').document(current_user["uid"])
-    user_doc = user_ref.get()
+    user_data = await get_doc('users', current_user["uid"])
 
-    if not user_doc.exists:
+    if not user_data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user_data = user_doc.to_dict()
     gps_location = user_data.get('gps_location')
-
     if not gps_location:
         raise HTTPException(
             status_code=400,
@@ -551,47 +545,34 @@ async def get_nearby_requests_by_gps_endpoint(
     user_lon = gps_location['longitude']
 
     # Get all open requests
-    requests_ref = db.collection('requests')
-    query = requests_ref.where(filter=firestore.FieldFilter('status', '==', 'open'))
-
-    nearby_requests = []
+    q = build_query('requests', filters=[('status', '==', 'open')])
+    open_requests = await stream_query(q)
 
     from location_service import calculate_distance_meters
+    nearby_requests = []
 
-    for doc in query.stream():
-        request_data = doc.to_dict()
-
-        # Skip own requests
+    for request_data in open_requests:
         if request_data.get('posted_by') == current_user["uid"]:
             continue
-
-        # Check if request has GPS coordinates for pickup
         pickup_gps = request_data.get('pickup_gps')
         if not pickup_gps:
             continue
-
-        # Calculate distance from user to pickup location
         distance = calculate_distance_meters(
             user_lat, user_lon,
             pickup_gps['latitude'], pickup_gps['longitude']
         )
-
         if distance <= radius_meters:
             request_data['distance_meters'] = round(distance, 2)
             request_data['distance_km'] = round(distance / 1000, 2)
             nearby_requests.append(request_data)
 
-    # Sort by distance
     nearby_requests.sort(key=lambda x: x.get('distance_meters', 999999))
 
     return {
         'total': len(nearby_requests),
         'radius_meters': radius_meters,
         'radius_km': round(radius_meters / 1000, 2),
-        'user_location': {
-            'latitude': user_lat,
-            'longitude': user_lon
-        },
+        'user_location': {'latitude': user_lat, 'longitude': user_lon},
         'requests': nearby_requests
     }
 
@@ -683,6 +664,7 @@ async def bulk_location_update_endpoint(
     }
     """
     from location_service import detect_area_from_coordinates_fast
+    from firestore_async import update_doc as _update_doc
 
     results = []
     errors = []
@@ -697,19 +679,17 @@ async def bulk_location_update_endpoint(
                 errors.append(f"Invalid update: {update}")
                 continue
 
-            # Use ultra-fast detection
             area = detect_area_from_coordinates_fast(lat, lon)
+            now = utcnow()
 
-            # Update user
-            user_ref = db.collection('users').document(user_uid)
-            user_ref.update({
+            await _update_doc('users', user_uid, {
                 'gps_location': {
                     'latitude': lat,
                     'longitude': lon,
-                    'last_updated': datetime.utcnow()
+                    'last_updated': now,
                 },
                 'current_area': area,
-                'updated_at': datetime.utcnow()
+                'updated_at': now,
             })
 
             results.append({
@@ -751,31 +731,39 @@ async def location_performance_test(
         (28.920, 77.100)  # Random outside
     ]
 
-    # Test fast mode
-    start_fast = time.time()
-    fast_results = []
-    for lat, lon in test_coords * 100:  # 500 iterations
-        area = detect_area_from_coordinates_fast(lat, lon)
-        fast_results.append(area)
-    fast_time = time.time() - start_fast
+    # Run CPU-bound work in a thread to avoid blocking the event loop
+    def _run_perf_test():
+        import time as _time
 
-    # Test normal mode
-    start_normal = time.time()
-    normal_results = []
-    for lat, lon in test_coords * 100:  # 500 iterations
-        info = detect_area_from_coordinates(lat, lon, include_nearby=False)
-        normal_results.append(info['primary_area'])
-    normal_time = time.time() - start_normal
+        # Test fast mode
+        start_fast = _time.time()
+        fast_results = []
+        for lat, lon in test_coords * 100:
+            area = detect_area_from_coordinates_fast(lat, lon)
+            fast_results.append(area)
+        fast_time = _time.time() - start_fast
+
+        # Test normal mode
+        start_normal = _time.time()
+        normal_results = []
+        for lat, lon in test_coords * 100:
+            info = detect_area_from_coordinates(lat, lon, include_nearby=False)
+            normal_results.append(info['primary_area'])
+        normal_time = _time.time() - start_normal
+
+        return fast_time, normal_time, len(test_coords) * 100
+
+    fast_time, normal_time, iterations = await asyncio.to_thread(_run_perf_test)
 
     return {
-        'test_iterations': len(test_coords) * 100,
+        'test_iterations': iterations,
         'fast_mode': {
             'time_seconds': round(fast_time, 3),
-            'avg_per_lookup_ms': round((fast_time / (len(test_coords) * 100)) * 1000, 2)
+            'avg_per_lookup_ms': round((fast_time / iterations) * 1000, 2)
         },
         'normal_mode': {
             'time_seconds': round(normal_time, 3),
-            'avg_per_lookup_ms': round((normal_time / (len(test_coords) * 100)) * 1000, 2)
+            'avg_per_lookup_ms': round((normal_time / iterations) * 1000, 2)
         },
         'speedup': f"{round(normal_time / fast_time, 1)}x faster",
         'recommendation': 'Use fast_mode=true for frequent background updates, fast_mode=false for user-initiated updates'
@@ -849,7 +837,7 @@ async def get_reachable_count_endpoint(
     - Proper _nearby area handling
     """
     try:
-        # Rate limiting
+        # Rate limiting (Redis-backed)
         await rate_limit(f"count:{current_user['uid']}", max_requests=1, window_seconds=10)
 
         # Get count (will use cache if available)
@@ -892,7 +880,7 @@ async def get_reachable_by_area_endpoint(
     - Staleness check
     """
     try:
-        # Rate limiting
+        # Rate limiting (Redis-backed)
         await rate_limit(f"count_by_area:{current_user['uid']}", max_requests=1, window_seconds=10)
 
         area_counts = await get_reachable_users_by_area(
@@ -967,19 +955,10 @@ async def get_device_distribution_endpoint(
         current_user: dict = Depends(get_current_user)
 ):
     """
-    Get device analytics across all areas
-
-    Returns per-area breakdown:
-    - Unique devices
-    - Total users
-    - Users without device_id
-    - Device coverage percentage
-
-    Useful for:
-    - Understanding device adoption per area
-    - Identifying areas needing mobile app updates
-    - Monitoring system health
+    Get device analytics across all areas (admin only)
     """
+    if not settings.is_admin(current_user.get('email', '')):
+        raise HTTPException(status_code=403, detail="Admin access required")
     try:
         from areas import get_area_device_analytics
 
@@ -1006,18 +985,10 @@ async def get_device_analytics_endpoint(
         current_user: dict = Depends(get_current_user)
 ):
     """
-    Get detailed device analytics including OS distribution
-
-    Returns:
-    - Total devices tracked
-    - OS distribution (Android, iOS counts)
-    - Devices with multiple accounts (edge case detection)
-
-    Useful for:
-    - Platform distribution insights
-    - Multi-account detection
-    - System monitoring
+    Get detailed device analytics including OS distribution (admin only)
     """
+    if not settings.is_admin(current_user.get('email', '')):
+        raise HTTPException(status_code=403, detail="Admin access required")
     try:
         from connectivity import get_device_analytics
 
@@ -1180,11 +1151,27 @@ async def get_request_status_endpoint(
         request_id: str,
         current_user: dict = Depends(get_current_user)
 ):
-    """Get status and details of a specific request"""
+    """Get status and details of a specific request (authorized users only)"""
     request = await get_request_by_id(request_id)
 
     if not request:
         raise HTTPException(status_code=404, detail="Request not found")
+
+    # IDOR fix: only poster/acceptor/admin can see sensitive details
+    uid = current_user["uid"]
+    is_poster = request.get('posted_by') == uid
+    is_acceptor = request.get('accepted_by') == uid
+    is_admin = settings.is_admin(current_user.get('email', ''))
+
+    if not (is_poster or is_acceptor or is_admin):
+        # Strip sensitive fields for unauthorized viewers
+        safe_fields = {
+            'request_id', 'item', 'pickup_location', 'pickup_area',
+            'drop_location', 'drop_area', 'reward', 'status',
+            'created_at', 'deadline', 'priority', 'is_expired',
+            'item_price', 'reward_auto_calculated',
+        }
+        request = {k: v for k, v in request.items() if k in safe_fields}
 
     return request
 
@@ -1604,32 +1591,42 @@ async def enhanced_dashboard_endpoint(
     - Nearby requests
     """
     try:
-        # Get user profile
-        user_profile = await get_user_profile(current_user["uid"])
+        uid = current_user["uid"]
 
-        # Get user stats
-        stats = await get_user_stats(current_user["uid"])
+        # Parallelize all independent reads (3-5x speedup)
+        profile_coro = get_user_profile(uid)
+        stats_coro = get_user_stats(uid)
+        rating_coro = get_user_rating_summary(uid)
+        reachable_coro = get_reachable_users_by_area()
+        my_reqs_coro = get_user_requests(uid)
+        nearby_coro = get_nearby_requests(uid)
 
-        # Get deliverer rating summary
-        try:
-            deliverer_rating = await get_user_rating_summary(current_user["uid"])
-        except:
+        results = await asyncio.gather(
+            profile_coro, stats_coro, rating_coro,
+            reachable_coro, my_reqs_coro, nearby_coro,
+            return_exceptions=True,
+        )
+
+        user_profile = results[0] if not isinstance(results[0], Exception) else None
+        stats = results[1] if not isinstance(results[1], Exception) else {}
+
+        if isinstance(results[2], Exception):
             deliverer_rating = {
                 "average_rating": 0.0,
                 "total_ratings": 0,
                 "rating_badge": "No Ratings Yet"
             }
+        else:
+            deliverer_rating = results[2]
 
-        # Get reachable users by area
-        reachable_by_area = await get_reachable_users_by_area()
+        reachable_by_area = results[3] if not isinstance(results[3], Exception) else {}
 
-        # Get user's active requests
-        active_requests = await get_user_requests(current_user["uid"])
-        active_requests = [r for r in active_requests if r.get('status') == 'open'][:5]
+        if isinstance(results[4], Exception):
+            active_requests = []
+        else:
+            active_requests = [r for r in results[4] if r.get('status') == 'open'][:5]
 
-        # Get nearby requests
-        nearby_requests = await get_nearby_requests(current_user["uid"])
-        nearby_requests = nearby_requests[:10]  # Limit to 10
+        nearby_requests = results[5][:10] if not isinstance(results[5], Exception) else []
 
         return {
             "user": user_profile,
@@ -1649,19 +1646,24 @@ async def dashboard_endpoint(current_user: dict = Depends(get_current_user)):
     Basic dashboard - user statistics and recent activity
     """
     try:
-        # Get user stats
-        stats = await get_user_stats(current_user["uid"])
+        uid = current_user["uid"]
 
-        # Get recent requests
-        my_requests = await get_user_requests(current_user["uid"])
-        accepted_requests = await get_accepted_requests(current_user["uid"])
+        # Parallelize all independent reads
+        stats_coro, my_reqs_coro, accepted_coro = (
+            get_user_stats(uid),
+            get_user_requests(uid),
+            get_accepted_requests(uid),
+        )
+        stats, my_requests, accepted_requests = await asyncio.gather(
+            stats_coro, my_reqs_coro, accepted_coro
+        )
 
         return {
             "message": f"Welcome, {current_user['email']}!",
-            "user_id": current_user["uid"],
+            "user_id": uid,
             "stats": stats,
-            "recent_posted": my_requests[:5],  # Last 5
-            "recent_accepted": accepted_requests[:5]  # Last 5
+            "recent_posted": my_requests[:5],
+            "recent_accepted": accepted_requests[:5]
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1677,10 +1679,10 @@ async def invalidate_count_cache_endpoint(
         current_user: dict = Depends(get_current_user)
 ):
     """
-    Manually invalidate count cache (admin/testing only)
-
-    Use this after bulk data changes
+    Manually invalidate count cache (admin only)
     """
+    if not settings.is_admin(current_user.get('email', '')):
+        raise HTTPException(status_code=403, detail="Admin access required")
     try:
         from areas import invalidate_count_cache
         await invalidate_count_cache()
@@ -1698,15 +1700,10 @@ async def get_connectivity_stats_endpoint(
         current_user: dict = Depends(get_current_user)
 ):
     """
-    Get overall connectivity statistics with device tracking
-
-    NEW FIELDS:
-    - unique_devices: Count of unique devices
-    - users_with_devices: Users who have device_id registered
-    - multi_device_users: Edge case indicator (should be near 0)
-
-    Note: In production, this should be admin-only
+    Get overall connectivity statistics with device tracking (admin only)
     """
+    if not settings.is_admin(current_user.get('email', '')):
+        raise HTTPException(status_code=403, detail="Admin access required")
     try:
         stats = await get_connectivity_stats()
         return stats
@@ -1724,15 +1721,10 @@ async def device_count_comparison_endpoint(
         current_user: dict = Depends(get_current_user)
 ):
     """
-    Compare user-based vs device-based counting
-
-    Useful for:
-    - Verifying device counting works correctly
-    - Understanding deduplication impact
-    - Testing and debugging
-
-    Returns side-by-side comparison of both counting methods
+    Compare user-based vs device-based counting (admin only)
     """
+    if not settings.is_admin(current_user.get('email', '')):
+        raise HTTPException(status_code=403, detail="Admin access required")
     try:
         # Get counts using both methods
         user_count = await get_reachable_users_count(
@@ -1766,6 +1758,9 @@ async def device_count_comparison_endpoint(
 
 # ============================================
 # RUN SERVER
+# ============================================
+# Development:  python main.py
+# Production:   gunicorn -c gunicorn_config.py main:app
 # ============================================
 
 if __name__ == "__main__":

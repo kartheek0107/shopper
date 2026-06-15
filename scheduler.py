@@ -1,24 +1,37 @@
 # scheduler.py
 import asyncio
-from datetime import datetime
+import logging
+from firestore_async import utcnow
 from database import mark_expired_requests
 from config import settings
 
+logger = logging.getLogger(__name__)
+
+
 async def cleanup_expired_requests_job():
     """
-    Run periodically to mark expired requests
+    Run periodically to mark expired requests.
+    Interval is controlled by settings.CLEANUP_INTERVAL_MINUTES.
+    Includes exponential backoff on repeated failures.
     """
     interval_seconds = settings.CLEANUP_INTERVAL_MINUTES * 60
-    
+    consecutive_errors = 0
+    MAX_BACKOFF = 300  # 5 minute max backoff
+
     while True:
         try:
             expired_count = await mark_expired_requests()
+            consecutive_errors = 0  # Reset on success
             if expired_count > 0:
-                print(f"✅ Marked {expired_count} requests as expired")
+                logger.info(f"✅ Marked {expired_count} requests as expired")
         except Exception as e:
-            print(f"❌ Error in cleanup job: {e}")
-        
-        
-        await asyncio.sleep(interval_seconds)
+            consecutive_errors += 1
+            backoff = min(2 ** consecutive_errors, MAX_BACKOFF)
+            logger.error(
+                f"❌ Error in cleanup job (attempt {consecutive_errors}): {e}. "
+                f"Backing off {backoff}s"
+            )
+            await asyncio.sleep(backoff)
+            continue
 
-# Start in background when app starts
+        await asyncio.sleep(interval_seconds)

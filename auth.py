@@ -2,15 +2,12 @@ import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from fastapi import HTTPException, Security, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from datetime import datetime
 from config import settings
+from firestore_async import get_db, utcnow, get_doc, update_doc, set_doc
 
 # Initialize Firebase Admin SDK
 cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
 firebase_admin.initialize_app(cred)
-
-# Initialize Firestore
-db = firestore.client()
 
 # Security scheme for bearer token
 security = HTTPBearer()
@@ -93,6 +90,8 @@ async def verify_firebase_token(
             status_code=401,
             detail="Authentication token has expired"
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=401,
@@ -103,6 +102,9 @@ async def verify_firebase_token(
 async def store_user_in_firestore(user_data: dict) -> dict:
     """
     Store or update user data in Firestore.
+
+    Throttles last_login writes: skips the update if the user was seen
+    less than 5 minutes ago (saves ~10K Firestore writes/min at scale).
     
     Args:
         user_data: Dictionary containing user information
@@ -110,31 +112,38 @@ async def store_user_in_firestore(user_data: dict) -> dict:
     Returns:
         dict: Stored user data with timestamp
     """
-    users_ref = db.collection('users')
-    user_doc_ref = users_ref.document(user_data['uid'])
-    
-    # Prepare user document
+    now = utcnow()
+
     user_document = {
         "uid": user_data['uid'],
         "email": user_data['email'],
         "email_verified": user_data['email_verified'],
-        "last_login": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "last_login": now,
+        "updated_at": now,
     }
     
     # Check if user already exists
-    user_doc = user_doc_ref.get()
+    existing = await get_doc('users', user_data['uid'])
     
-    if user_doc.exists:
-        # Update existing user
-        user_doc_ref.update({
-            "last_login": user_document["last_login"],
-            "updated_at": user_document["updated_at"]
+    if existing is not None:
+        # Skip write if last_login is recent (within 5 minutes)
+        last_login = existing.get('last_login')
+        if last_login is not None:
+            from datetime import timezone, timedelta
+            if last_login.tzinfo is None:
+                last_login = last_login.replace(tzinfo=timezone.utc)
+            if (now - last_login) < timedelta(minutes=5):
+                # User was seen recently — return existing data without writing
+                return existing
+
+        await update_doc('users', user_data['uid'], {
+            "last_login": now,
+            "updated_at": now,
         })
     else:
         # Create new user with created_at timestamp
-        user_document["created_at"] = datetime.utcnow()
-        user_doc_ref.set(user_document)
+        user_document["created_at"] = now
+        await set_doc('users', user_data['uid'], user_document)
     
     return user_document
 

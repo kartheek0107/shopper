@@ -15,7 +15,14 @@ class Settings:
         "ALLOWED_EMAIL_DOMAIN", 
         "@iiitsonepat.ac.in"
     )
-    
+
+    # Admin emails (comma-separated)
+    ADMIN_EMAILS = [
+        e.strip()
+        for e in os.getenv("ADMIN_EMAILS", "").split(",")
+        if e.strip()
+    ]
+
     # Gmail SMTP Configuration
     SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
     SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -28,9 +35,9 @@ class Settings:
     
     # API configuration
     API_TITLE = "College Delivery System API"
-    API_VERSION = "3.0.0"
+    API_VERSION = "3.1.0"
     API_DESCRIPTION = """
-    College Delivery System API - Phase 3
+    College Delivery System API - Phase 3.1 (Production Hardened)
     
     Features:
     - User Authentication with Firebase
@@ -43,11 +50,14 @@ class Settings:
     - Deliverer Rating System
     """
     
-    # CORS settings (adjust for your frontend)
+    # CORS settings — read from env for production, fallback to dev defaults
     CORS_ORIGINS = [
-        "http://localhost:3000",  # React default
-        "http://localhost:5173",  # Vite default
-        "http://localhost:8080",  # Vue default
+        o.strip()
+        for o in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:3000,http://localhost:5173,http://localhost:8080"
+        ).split(",")
+        if o.strip()
     ]
     
     # Predefined campus areas
@@ -65,7 +75,7 @@ class Settings:
     DEFAULT_DEADLINE_HOURS = 24  # Default: 24 hours
     
     # Background job settings
-    CLEANUP_INTERVAL_MINUTES = 0.17  # Every 10 seconds
+    CLEANUP_INTERVAL_MINUTES = float(os.getenv("CLEANUP_INTERVAL_MINUTES", "5"))
 
     # Connectivity settings
     CONNECTIVITY_CHECK_INTERVAL_MINUTES = 5
@@ -76,5 +86,19 @@ class Settings:
     
     # Email verification settings
     VERIFICATION_TOKEN_EXPIRY_HOURS = 24  # Verification link expires in 24 hours
+
+    # Pagination defaults
+    DEFAULT_PAGE_SIZE = 20
+    MAX_PAGE_SIZE = 100
+
+    # Rate limiter
+    RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300  # Purge stale entries every 5 min
+
+    # FCM concurrency (max parallel notification sends)
+    FCM_SEND_CONCURRENCY = 20
+
+    def is_admin(self, email: str) -> bool:
+        """Check if an email belongs to an admin user."""
+        return email in self.ADMIN_EMAILS
 
 settings = Settings()

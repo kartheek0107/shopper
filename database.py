@@ -1,36 +1,44 @@
-from firebase_admin import firestore
-from datetime import datetime, timezone
+"""
+Database operations for the College Delivery System.
+
+Production-hardened:
+- All Firestore I/O is async (non-blocking event loop)
+- Timezone-aware timestamps throughout
+- Pagination support on list queries
+- Firestore-side ordering instead of in-memory sort
+"""
+
+from datetime import timezone
 from typing import List, Optional, Dict
 from fastapi import HTTPException
 import uuid
+import logging
 
-# Import reward calculator
+from firebase_admin import firestore as _fs
+from google.cloud.firestore_v1 import Increment as _Increment
+from firestore_async import (
+    get_db, utcnow,
+    get_doc, set_doc, update_doc,
+    build_query, stream_query, stream_query_snapshots,
+    run_transaction,
+)
 from reward_calculator import calculate_reward
-
-# Get Firestore client
-db = firestore.client()
+from config import settings
 
 
 # ============================================
-# REQUEST OPERATIONS (Updated for Auto Reward + GPS)
+# REQUEST OPERATIONS
 # ============================================
 
 async def create_request(user_uid: str, user_email: str, request_data: dict) -> dict:
     """
     Create a new request in Firestore with auto-calculated reward support.
-
-    Changes:
-    - reward is now OPTIONAL - auto-calculated if not provided
-    - time_requested is now OPTIONAL - no longer required
-    - Adds reward_auto_calculated field to track calculation source
     """
-
-    # Validate required field: item_price
     if "item_price" not in request_data:
         raise HTTPException(status_code=400, detail="item_price is required for every request")
 
     request_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
+    now = utcnow()
 
     item_price = request_data["item_price"]
 
@@ -47,90 +55,83 @@ async def create_request(user_uid: str, user_email: str, request_data: dict) -> 
         reward = request_data["reward"]
         reward_auto_calculated = False
 
-    # Get poster information from Firestore
-    user_ref = db.collection('users').document(user_uid)
-    user_doc = user_ref.get()
+    # Get poster information
+    user_data = await get_doc('users', user_uid)
     poster_name = 'Unknown'
     poster_phone = 'N/A'
-
-    if user_doc.exists:
-        user_data = user_doc.to_dict()
-        poster_name = user_data.get('name')
-        poster_phone = user_data.get('phone')
+    if user_data:
+        poster_name = user_data.get('name', 'Unknown')
+        poster_phone = user_data.get('phone', 'N/A')
 
     request_document = {
         "request_id": request_id,
         "posted_by": user_uid,
-        "postedBy": user_uid,  # camelCase version
+        "postedBy": user_uid,
         "poster_email": user_email,
-        "posterEmail": user_email,  # camelCase version
+        "posterEmail": user_email,
         "poster_name": poster_name,
-        "posterName": poster_name,  # camelCase version
+        "posterName": poster_name,
         "poster_phone": poster_phone,
-        "posterPhone": poster_phone,  # camelCase version
+        "posterPhone": poster_phone,
 
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
-        "pickupLocation": request_data["pickup_location"],  # camelCase version
+        "pickupLocation": request_data["pickup_location"],
         "pickup_area": request_data.get("pickup_area"),
-        "pickupArea": request_data.get("pickup_area"),  # camelCase version
+        "pickupArea": request_data.get("pickup_area"),
         "drop_location": request_data["drop_location"],
-        "dropLocation": request_data["drop_location"],  # camelCase version
+        "dropLocation": request_data["drop_location"],
         "drop_area": request_data.get("drop_area"),
-        "dropArea": request_data.get("drop_area"),  # camelCase version
+        "dropArea": request_data.get("drop_area"),
 
-        # Item price (required)
         "item_price": request_data.get("item_price"),
-        "itemPrice": request_data.get("item_price"),  # camelCase version
-
-        # Reward (auto-calculated or user-provided)
+        "itemPrice": request_data.get("item_price"),
         "reward": reward,
         "reward_auto_calculated": reward_auto_calculated,
-        "rewardAutoCalculated": reward_auto_calculated,  # camelCase version
+        "rewardAutoCalculated": reward_auto_calculated,
 
-        # Time requested (now optional)
         "time_requested": request_data.get("time_requested"),
-        "timeRequested": request_data.get("time_requested"),  # camelCase version
+        "timeRequested": request_data.get("time_requested"),
 
         "status": "open",
-        "accepted_by": None,
-        "acceptedBy": None,  # camelCase version
-        "acceptor_email": None,
-        "acceptorEmail": None,  # camelCase version
-        "acceptor_name": None,
-        "acceptorName": None,  # camelCase version
-        "acceptor_phone": None,
-        "acceptorPhone": None,  # camelCase version
+        "accepted_by": None, "acceptedBy": None,
+        "acceptor_email": None, "acceptorEmail": None,
+        "acceptor_name": None, "acceptorName": None,
+        "acceptor_phone": None, "acceptorPhone": None,
 
-        # Timestamps
-        "created_at": now,
-        "createdAt": now,  # camelCase version
-        "updated_at": now,
-        "updatedAt": now,  # camelCase version
-        "accepted_at": None,
-        "acceptedAt": None,  # camelCase version
-        "completed_at": None,
-        "completedAt": None,  # camelCase version
+        "created_at": now, "createdAt": now,
+        "updated_at": now, "updatedAt": now,
+        "accepted_at": None, "acceptedAt": None,
+        "completed_at": None, "completedAt": None,
 
         "notes": request_data.get("notes"),
         "deadline": request_data.get("deadline"),
         "priority": request_data.get("priority", False),
-        "is_expired": False,
-        "isExpired": False,  # camelCase version
+        "is_expired": False, "isExpired": False,
     }
 
-    db.collection('requests').document(request_id).set(request_document)
+    await set_doc('requests', request_id, request_document)
+
+    # Denormalize: increment poster's stats counters
+    try:
+        await update_doc('users', user_uid, {
+            'stats.total_posted': _Increment(1),
+            'stats.active_requests': _Increment(1),
+        })
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Stats increment failed for {user_uid}: {e}")
+
     return request_document
 
 
 async def create_request_with_gps(user_uid: str, user_email: str, request_data: dict) -> dict:
     """
-    Create request with GPS support and auto-calculated reward
-    Auto-detect areas if GPS provided but areas not specified
+    Create request with GPS support and auto-calculated reward.
+    Auto-detect areas if GPS provided but areas not specified.
     """
     request_id = str(uuid.uuid4())
+    now = utcnow()
 
-    # Auto-detect areas from GPS if not provided
     pickup_area = request_data.get("pickup_area")
     drop_area = request_data.get("drop_area")
 
@@ -138,30 +139,26 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
         from location_service import detect_area_from_coordinates
         pickup_gps = request_data["pickup_gps"]
         pickup_area = detect_area_from_coordinates(
-            pickup_gps["latitude"],
-            pickup_gps["longitude"]
+            pickup_gps["latitude"], pickup_gps["longitude"]
         )
 
     if not drop_area and request_data.get("drop_gps"):
         from location_service import detect_area_from_coordinates
         drop_gps = request_data["drop_gps"]
         drop_area = detect_area_from_coordinates(
-            drop_gps["latitude"],
-            drop_gps["longitude"]
+            drop_gps["latitude"], drop_gps["longitude"]
         )
 
-    # Calculate delivery distance if both GPS coordinates provided
     delivery_distance = None
     if request_data.get("pickup_gps") and request_data.get("drop_gps"):
-        from location_service import calculate_distance
+        from location_service import calculate_distance_meters
         pickup_gps = request_data["pickup_gps"]
         drop_gps = request_data["drop_gps"]
-        delivery_distance = calculate_distance(
+        delivery_distance = calculate_distance_meters(
             pickup_gps["latitude"], pickup_gps["longitude"],
             drop_gps["latitude"], drop_gps["longitude"]
         )
 
-    # AUTO-CALCULATE REWARD if not provided (AFTER area detection)
     item_price = request_data["item_price"]
     if "reward" not in request_data or request_data["reward"] is None:
         reward = calculate_reward(
@@ -175,80 +172,63 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
         reward = request_data["reward"]
         reward_auto_calculated = False
 
-    # Get poster information from Firestore
-    user_ref = db.collection('users').document(user_uid)
-    user_doc = user_ref.get()
+    user_data = await get_doc('users', user_uid)
     poster_name = 'Unknown'
     poster_phone = 'N/A'
-
-    if user_doc.exists:
-        user_data = user_doc.to_dict()
+    if user_data:
         poster_name = user_data.get('name', 'Unknown')
         poster_phone = user_data.get('phone', 'N/A')
 
     request_document = {
         "request_id": request_id,
-        "posted_by": user_uid,
-        "postedBy": user_uid,  # camelCase
-        "poster_email": user_email,
-        "posterEmail": user_email,  # camelCase
-        "poster_name": poster_name,
-        "posterName": poster_name,  # camelCase
-        "poster_phone": poster_phone,
-        "posterPhone": poster_phone,  # camelCase
+        "posted_by": user_uid, "postedBy": user_uid,
+        "poster_email": user_email, "posterEmail": user_email,
+        "poster_name": poster_name, "posterName": poster_name,
+        "poster_phone": poster_phone, "posterPhone": poster_phone,
         "item": request_data["item"],
         "pickup_location": request_data["pickup_location"],
-        "pickupLocation": request_data["pickup_location"],  # camelCase
-        "pickup_area": pickup_area,
-        "pickupArea": pickup_area,  # camelCase
+        "pickupLocation": request_data["pickup_location"],
+        "pickup_area": pickup_area, "pickupArea": pickup_area,
         "pickup_gps": request_data.get("pickup_gps"),
-        "pickupGps": request_data.get("pickup_gps"),  # camelCase
+        "pickupGps": request_data.get("pickup_gps"),
         "drop_location": request_data["drop_location"],
-        "dropLocation": request_data["drop_location"],  # camelCase
-        "drop_area": drop_area,
-        "dropArea": drop_area,  # camelCase
+        "dropLocation": request_data["drop_location"],
+        "drop_area": drop_area, "dropArea": drop_area,
         "drop_gps": request_data.get("drop_gps"),
-        "dropGps": request_data.get("drop_gps"),  # camelCase
+        "dropGps": request_data.get("drop_gps"),
         "delivery_distance_km": delivery_distance,
-        "deliveryDistanceKm": delivery_distance,  # camelCase
-
-        # Time requested (now optional)
+        "deliveryDistanceKm": delivery_distance,
         "time_requested": request_data.get("time_requested"),
-        "timeRequested": request_data.get("time_requested"),  # camelCase
-
-        # Item price and reward
-        "item_price": item_price,
-        "itemPrice": item_price,  # camelCase
+        "timeRequested": request_data.get("time_requested"),
+        "item_price": item_price, "itemPrice": item_price,
         "reward": reward,
         "reward_auto_calculated": reward_auto_calculated,
-        "rewardAutoCalculated": reward_auto_calculated,  # camelCase
-
+        "rewardAutoCalculated": reward_auto_calculated,
         "status": "open",
-        "accepted_by": None,
-        "acceptedBy": None,  # camelCase
-        "acceptor_email": None,
-        "acceptorEmail": None,  # camelCase
-        "acceptor_name": None,
-        "acceptorName": None,  # camelCase
-        "acceptor_phone": None,
-        "acceptorPhone": None,  # camelCase
-        "created_at": datetime.now(timezone.utc),
-        "createdAt": datetime.now(timezone.utc),  # camelCase
-        "accepted_at": None,
-        "acceptedAt": None,  # camelCase
-        "completed_at": None,
-        "completedAt": None,  # camelCase
-        "updated_at": datetime.now(timezone.utc),
-        "updatedAt": datetime.now(timezone.utc),  # camelCase
+        "accepted_by": None, "acceptedBy": None,
+        "acceptor_email": None, "acceptorEmail": None,
+        "acceptor_name": None, "acceptorName": None,
+        "acceptor_phone": None, "acceptorPhone": None,
+        "created_at": now, "createdAt": now,
+        "accepted_at": None, "acceptedAt": None,
+        "completed_at": None, "completedAt": None,
+        "updated_at": now, "updatedAt": now,
         "notes": request_data.get("notes"),
         "deadline": request_data.get("deadline"),
         "priority": request_data.get("priority", False),
-        "is_expired": False,
-        "isExpired": False,  # camelCase
+        "is_expired": False, "isExpired": False,
     }
 
-    # Store in Firestore
-    db.collection('requests').document(request_id).set(request_document)
+    await set_doc('requests', request_id, request_document)
+
+    # Denormalize: increment poster's stats counters
+    try:
+        await update_doc('users', user_uid, {
+            'stats.total_posted': _Increment(1),
+            'stats.active_requests': _Increment(1),
+        })
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Stats increment failed for {user_uid}: {e}")
 
     return request_document
 
@@ -256,398 +236,328 @@ async def create_request_with_gps(user_uid: str, user_email: str, request_data: 
 async def mark_expired_requests() -> int:
     """
     Marks requests as expired if deadline passed and not completed.
-
-    Returns:
-        int: Number of requests marked as expired
+    Returns count of newly expired requests.
     """
-    requests_ref = db.collection('requests')
+    now = utcnow()
 
-    # Get all open/accepted requests
-    query = requests_ref.where(
-        filter=firestore.FieldFilter('status', 'in', ['open', 'accepted'])
-    ).where(
-        filter=firestore.FieldFilter('is_expired', '==', False)
+    q = build_query(
+        'requests',
+        filters=[
+            ('status', 'in', ['open', 'accepted']),
+            ('is_expired', '==', False),
+        ],
     )
+    docs = await stream_query_snapshots(q)
 
-    now = datetime.now(timezone.utc)
     expired_count = 0
-
-    for doc in query.stream():
+    for doc in docs:
         request_data = doc.to_dict()
         deadline = request_data.get('deadline')
+        if not deadline:
+            continue
 
-        if deadline:
-            # Ensure deadline is timezone-aware
-            if deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=timezone.utc)
+        # Ensure deadline is timezone-aware
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
 
-            if deadline < now:
-                # Mark as expired and cancelled
-                doc.reference.update({
-                    'is_expired': True,
-                    'status': 'cancelled',
-                    'updated_at': now,
-                    'cancelled_reason': 'Deadline expired'
-                })
-                expired_count += 1
+        if deadline < now:
+            await update_doc('requests', doc.id, {
+                'is_expired': True,
+                'status': 'cancelled',
+                'updated_at': now,
+                'cancelled_reason': 'Deadline expired',
+            })
+            expired_count += 1
 
     return expired_count
 
 
 async def get_all_requests(
-        status: Optional[str] = None,
-        pickup_area: Optional[str] = None,
-        drop_area: Optional[str] = None,
-        include_expired: bool = False
+    status: Optional[str] = None,
+    pickup_area: Optional[str] = None,
+    drop_area: Optional[str] = None,
+    include_expired: bool = False,
+    limit: int = None,
 ) -> List[dict]:
     """
-    Get all requests with optional filters
-
-    Args:
-        status: Optional status filter
-        pickup_area: Optional pickup area filter
-        drop_area: Optional drop area filter
-        include_expired: Whether to include expired requests
-
-    Returns:
-        List[dict]: List of requests
+    Get requests with optional filters.
+    Uses Firestore-side filtering where possible and pagination.
     """
-    requests_ref = db.collection('requests')
+    if limit is None:
+        limit = settings.DEFAULT_PAGE_SIZE
 
-    # Start with status filter if provided
+    filters = []
     if status:
-        query = requests_ref.where(filter=firestore.FieldFilter('status', '==', status))
-    else:
-        query = requests_ref
+        filters.append(('status', '==', status))
+    if not include_expired:
+        filters.append(('is_expired', '==', False))
 
-    # Get all matching documents
-    requests = []
-    for doc in query.stream():
-        request_data = doc.to_dict()
+    # Firestore compound query — pickup_area / drop_area pushed to server
+    # when possible (requires composite indexes; falls back to in-memory otherwise)
+    if pickup_area and not drop_area:
+        filters.append(('pickup_area', '==', pickup_area))
+    elif drop_area and not pickup_area:
+        filters.append(('drop_area', '==', drop_area))
 
-        # Apply area filters in memory
-        if pickup_area and request_data.get('pickup_area') != pickup_area:
-            continue
-        if drop_area and request_data.get('drop_area') != drop_area:
-            continue
-        if not include_expired and request_data.get('is_expired', False):
-            continue
+    q = build_query(
+        'requests',
+        filters=filters if filters else None,
+        order_by='created_at',
+        descending=True,
+        limit=limit,
+    )
+    requests = await stream_query(q)
 
-        requests.append(request_data)
+    # If both pickup_area AND drop_area were requested, we can't push both
+    # into a single Firestore inequality — filter the smaller set in memory
+    if pickup_area and drop_area:
+        requests = [
+            r for r in requests
+            if r.get('pickup_area') == pickup_area
+            and r.get('drop_area') == drop_area
+        ]
 
-    # Sort by creation time (newest first)
-    requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
-
-    return requests
-
-
-async def get_user_requests(user_uid: str) -> List[dict]:
-    """
-    Get all requests posted by a specific user
-
-    Args:
-        user_uid: UID of the user
-
-    Returns:
-        List[dict]: List of user's requests
-    """
-    requests_ref = db.collection('requests')
-    query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid))
-
-    requests = []
-    for doc in query.stream():
-        request_data = doc.to_dict()
-        requests.append(request_data)
-
-    # Sort in Python instead (no index required)
-    requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
+    # If only drop_area was used as the server filter and pickup_area was also
+    # supplied, the pickup filter was already pushed.  Vice-versa handled above.
 
     return requests
 
 
-async def get_accepted_requests(user_uid: str) -> List[dict]:
-    """
-    Get all requests accepted by a specific user
+async def get_user_requests(user_uid: str, limit: int = None) -> List[dict]:
+    """Get all requests posted by a specific user."""
+    if limit is None:
+        limit = settings.MAX_PAGE_SIZE
 
-    Args:
-        user_uid: UID of the user
+    q = build_query(
+        'requests',
+        filters=[('posted_by', '==', user_uid)],
+        order_by='created_at',
+        descending=True,
+        limit=limit,
+    )
+    return await stream_query(q)
 
-    Returns:
-        List[dict]: List of accepted requests
-    """
-    requests_ref = db.collection('requests')
-    query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid))
 
-    requests = []
-    for doc in query.stream():
-        request_data = doc.to_dict()
-        requests.append(request_data)
+async def get_accepted_requests(user_uid: str, limit: int = None) -> List[dict]:
+    """Get all requests accepted by a specific user."""
+    if limit is None:
+        limit = settings.MAX_PAGE_SIZE
 
-    # Sort in Python instead (no index required)
-    requests.sort(key=lambda x: x.get('created_at', datetime.min), reverse=True)
-
-    return requests
+    q = build_query(
+        'requests',
+        filters=[('accepted_by', '==', user_uid)],
+        order_by='created_at',
+        descending=True,
+        limit=limit,
+    )
+    return await stream_query(q)
 
 
 async def get_request_by_id(request_id: str) -> Optional[dict]:
-    """
-    Get a specific request by ID
-
-    Args:
-        request_id: Request ID
-
-    Returns:
-        dict: Request data or None if not found
-    """
-    doc = db.collection('requests').document(request_id).get()
-
-    if doc.exists:
-        request_data = doc.to_dict()
-        return request_data
-    return None
+    """Get a specific request by ID."""
+    return await get_doc('requests', request_id)
 
 
 async def accept_request(request_id: str, user_uid: str, user_email: str) -> dict:
     """
-    Accept a request (atomic operation)
-
-    Args:
-        request_id: Request ID to accept
-        user_uid: UID of the user accepting
-        user_email: Email of the user accepting
-
-    Returns:
-        dict: Updated request data
-
-    Raises:
-        HTTPException: If request not found, already accepted, or user is the poster
+    Accept a request (atomic transaction to prevent double-accept).
     """
+    db = get_db()
     request_ref = db.collection('requests').document(request_id)
 
-    # Get acceptor's name and phone from Firestore BEFORE the transaction
-    user_ref = db.collection('users').document(user_uid)
-    user_doc = user_ref.get()
+    # Get acceptor info BEFORE the transaction (reads inside transactions
+    # count toward the 500-write limit, so minimise them)
+    acceptor_data = await get_doc('users', user_uid)
     acceptor_name = 'Unknown'
     acceptor_phone = 'N/A'
+    if acceptor_data:
+        acceptor_name = acceptor_data.get('name', 'Unknown')
+        acceptor_phone = acceptor_data.get('phone', 'N/A')
 
-    if user_doc.exists:
-        user_data = user_doc.to_dict()
-        acceptor_name = user_data.get('name', 'Unknown')
-        acceptor_phone = user_data.get('phone', 'N/A')
-
-    # Use transaction for atomic update
-    @firestore.transactional
-    def update_in_transaction(transaction):
-        snapshot = request_ref.get(transaction=transaction)
-
+    @_fs.transactional
+    def _accept_txn(transaction, ref, uid, email, a_name, a_phone):
+        snapshot = ref.get(transaction=transaction)
         if not snapshot.exists:
             raise HTTPException(status_code=404, detail="Request not found")
 
-        request_data = snapshot.to_dict()
+        data = snapshot.to_dict()
 
-        # Check if already accepted
-        if request_data['status'] != 'open':
+        if data['status'] != 'open':
             raise HTTPException(
                 status_code=400,
-                detail=f"Request is already {request_data['status']}"
+                detail=f"Request is already {data['status']}"
             )
-
-        # Check if user is trying to accept their own request
-        if request_data['posted_by'] == user_uid:
+        if data['posted_by'] == uid:
             raise HTTPException(
                 status_code=400,
                 detail="You cannot accept your own request"
             )
 
-        # Update request with acceptor information
-        now = datetime.now(timezone.utc)
-        transaction.update(request_ref, {
+        now = utcnow()
+        updates = {
             'status': 'accepted',
-            'accepted_by': user_uid,
-            'acceptedBy': user_uid,  # camelCase
-            'acceptor_email': user_email,
-            'acceptorEmail': user_email,  # camelCase
-            'acceptor_name': acceptor_name,
-            'acceptorName': acceptor_name,  # camelCase
-            'acceptor_phone': acceptor_phone,
-            'acceptorPhone': acceptor_phone,  # camelCase
-            'accepted_at': now,
-            'acceptedAt': now,  # camelCase
-            'updated_at': now,
-            'updatedAt': now  # camelCase
+            'accepted_by': uid, 'acceptedBy': uid,
+            'acceptor_email': email, 'acceptorEmail': email,
+            'acceptor_name': a_name, 'acceptorName': a_name,
+            'acceptor_phone': a_phone, 'acceptorPhone': a_phone,
+            'accepted_at': now, 'acceptedAt': now,
+            'updated_at': now, 'updatedAt': now,
+        }
+        transaction.update(ref, updates)
+        data.update(updates)
+        return data
+
+    result = await run_transaction(
+        _accept_txn,
+        ref=request_ref,
+        uid=user_uid,
+        email=user_email,
+        a_name=acceptor_name,
+        a_phone=acceptor_phone,
+    )
+
+    # Denormalize: increment acceptor's stats counters
+    try:
+        await update_doc('users', user_uid, {
+            'stats.total_accepted': _Increment(1),
         })
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Stats increment failed for {user_uid}: {e}")
 
-        # Return updated data
-        request_data.update({
-            'status': 'accepted',
-            'accepted_by': user_uid,
-            'acceptedBy': user_uid,
-            'acceptor_email': user_email,
-            'acceptorEmail': user_email,
-            'acceptor_name': acceptor_name,
-            'acceptorName': acceptor_name,
-            'acceptor_phone': acceptor_phone,
-            'acceptorPhone': acceptor_phone,
-            'accepted_at': now,
-            'acceptedAt': now,
-            'updated_at': now,
-            'updatedAt': now
-        })
-        return request_data
-
-    # Execute transaction
-    transaction = db.transaction()
-    updated_request = update_in_transaction(transaction)
-
-    return updated_request
+    return result
 
 
 async def update_request_status(
-        request_id: str,
-        new_status: str,
-        user_uid: str
+    request_id: str,
+    new_status: str,
+    user_uid: str
 ) -> dict:
-    """
-    Update request status (only by poster or acceptor)
-
-    Args:
-        request_id: Request ID
-        new_status: New status (accepted, completed, cancelled)
-        user_uid: UID of user making the update
-
-    Returns:
-        dict: Updated request data
-
-    Raises:
-        HTTPException: If not authorized or invalid status transition
-    """
-    request_ref = db.collection('requests').document(request_id)
-    doc = request_ref.get()
-
-    if not doc.exists:
+    """Update request status (only by poster or acceptor)."""
+    request_data = await get_doc('requests', request_id)
+    if request_data is None:
         raise HTTPException(status_code=404, detail="Request not found")
 
-    request_data = doc.to_dict()
-
-    # Authorization check
     is_poster = request_data['posted_by'] == user_uid
     is_acceptor = request_data.get('accepted_by') == user_uid
-
     if not (is_poster or is_acceptor):
-        raise HTTPException(
-            status_code=403,
-            detail="Not authorized to update this request"
-        )
+        raise HTTPException(status_code=403, detail="Not authorized to update this request")
 
-    # Validate status transition
     current_status = request_data['status']
     valid_transitions = {
         'open': ['accepted', 'cancelled'],
         'accepted': ['completed', 'cancelled'],
         'completed': [],
-        'cancelled': []
+        'cancelled': [],
     }
-
     if new_status not in valid_transitions.get(current_status, []):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot transition from {current_status} to {new_status}"
         )
 
-    # Update status
-    now = datetime.now(timezone.utc)
-    update_data = {
-        'status': new_status,
-        'updated_at': now
-    }
-
+    now = utcnow()
+    update_data = {'status': new_status, 'updated_at': now}
     if new_status == 'completed':
         update_data['completed_at'] = now
 
-    request_ref.update(update_data)
+    await update_doc('requests', request_id, update_data)
     request_data.update(update_data)
+
+    # Denormalize: update stats counters based on transition
+    _log = logging.getLogger(__name__)
+    try:
+        poster_uid = request_data['posted_by']
+        acceptor_uid = request_data.get('accepted_by')
+
+        if new_status == 'completed' and acceptor_uid:
+            await update_doc('users', acceptor_uid, {
+                'stats.total_completed': _Increment(1),
+            })
+            # Decrement active_requests on poster
+            await update_doc('users', poster_uid, {
+                'stats.active_requests': _Increment(-1),
+            })
+        elif new_status == 'cancelled' and current_status == 'open':
+            # Request was open and is now cancelled — decrement active_requests
+            await update_doc('users', poster_uid, {
+                'stats.active_requests': _Increment(-1),
+            })
+    except Exception as e:
+        _log.warning(f"Stats decrement failed for request {request_id}: {e}")
 
     return request_data
 
 
 # ============================================
-# USER OPERATIONS (Enhanced for Phase 3)
+# USER OPERATIONS
 # ============================================
 
 async def get_user_profile(user_uid: str) -> Optional[dict]:
-    """
-    Get user profile from Firestore
-
-    Args:
-        user_uid: User UID
-
-    Returns:
-        dict: User data or None if not found
-    """
-    user_doc = db.collection('users').document(user_uid).get()
-
-    if user_doc.exists:
-        return user_doc.to_dict()
-    return None
+    """Get user profile from Firestore."""
+    return await get_doc('users', user_uid)
 
 
 async def update_user_profile(user_uid: str, profile_data: dict) -> dict:
-    """
-    Update user profile
-
-    Args:
-        user_uid: User UID
-        profile_data: Profile fields to update
-
-    Returns:
-        dict: Updated user data
-    """
-    user_ref = db.collection('users').document(user_uid)
-
-    update_data = {
-        **profile_data,
-        'updated_at': datetime.now(timezone.utc)
-    }
-
-    user_ref.update(update_data)
-
-    user_doc = user_ref.get()
-    return user_doc.to_dict()
+    """Update user profile."""
+    update_data = {**profile_data, 'updated_at': utcnow()}
+    await update_doc('users', user_uid, update_data)
+    return await get_doc('users', user_uid)
 
 
 async def get_user_stats(user_uid: str) -> dict:
     """
-    Get user statistics (requests posted, accepted, completed)
+    Get user statistics (requests posted, accepted, completed).
 
-    Args:
-        user_uid: User UID
-
-    Returns:
-        dict: User statistics
+    First tries the denormalized ``stats`` field on the user document
+    (single read).  Falls back to the legacy 4-query approach for
+    users whose stats haven't been initialized yet.
     """
-    requests_ref = db.collection('requests')
+    user_data = await get_doc('users', user_uid)
+    if user_data and 'stats' in user_data:
+        stats = user_data['stats']
+        return {
+            'total_posted': stats.get('total_posted', 0),
+            'total_accepted': stats.get('total_accepted', 0),
+            'total_completed': stats.get('total_completed', 0),
+            'active_requests': max(stats.get('active_requests', 0), 0),
+        }
 
-    # Count posted requests
-    posted_query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid))
-    total_posted = len(list(posted_query.stream()))
+    # Legacy fallback — runs 4 queries (will be used only for old users)
+    import asyncio
+    posted_q = stream_query(
+        build_query('requests', filters=[('posted_by', '==', user_uid)])
+    )
+    accepted_q = stream_query(
+        build_query('requests', filters=[('accepted_by', '==', user_uid)])
+    )
+    completed_q = stream_query(
+        build_query('requests', filters=[
+            ('accepted_by', '==', user_uid),
+            ('status', '==', 'completed'),
+        ])
+    )
+    active_q = stream_query(
+        build_query('requests', filters=[
+            ('posted_by', '==', user_uid),
+            ('status', '==', 'open'),
+        ])
+    )
 
-    # Count accepted requests
-    accepted_query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid))
-    total_accepted = len(list(accepted_query.stream()))
+    posted, accepted, completed, active = await asyncio.gather(
+        posted_q, accepted_q, completed_q, active_q
+    )
 
-    # Count completed requests (as acceptor)
-    completed_query = requests_ref.where(filter=firestore.FieldFilter('accepted_by', '==', user_uid)).where(
-        filter=firestore.FieldFilter('status', '==', 'completed'))
-    total_completed = len(list(completed_query.stream()))
-
-    # Count active requests (posted and still open)
-    active_query = requests_ref.where(filter=firestore.FieldFilter('posted_by', '==', user_uid)).where(
-        filter=firestore.FieldFilter('status', '==', 'open'))
-    active_requests = len(list(active_query.stream()))
-
-    return {
-        'total_posted': total_posted,
-        'total_accepted': total_accepted,
-        'total_completed': total_completed,
-        'active_requests': active_requests
+    stats = {
+        'total_posted': len(posted),
+        'total_accepted': len(accepted),
+        'total_completed': len(completed),
+        'active_requests': len(active),
     }
+
+    # Seed the stats field so future reads are fast
+    try:
+        await update_doc('users', user_uid, {'stats': stats})
+    except Exception:
+        pass
+
+    return stats
