@@ -281,46 +281,50 @@ async def get_all_requests(
 ) -> List[dict]:
     """
     Get requests with optional filters.
-    Uses Firestore-side filtering where possible and pagination.
+    Performs server-side query on status only to avoid composite index requirements.
+    Filters by areas/expiry and sorts by created_at in memory.
     """
     if limit is None:
         limit = settings.DEFAULT_PAGE_SIZE
 
+    # Only filter by status on Firestore server side (safe single-field index)
     filters = []
     if status:
         filters.append(('status', '==', status))
-    if not include_expired:
-        filters.append(('is_expired', '==', False))
-
-    # Firestore compound query — pickup_area / drop_area pushed to server
-    # when possible (requires composite indexes; falls back to in-memory otherwise)
-    if pickup_area and not drop_area:
-        filters.append(('pickup_area', '==', pickup_area))
-    elif drop_area and not pickup_area:
-        filters.append(('drop_area', '==', drop_area))
 
     q = build_query(
         'requests',
         filters=filters if filters else None,
-        order_by='created_at',
-        descending=True,
-        limit=limit,
+        limit=None,
     )
     requests = await stream_query(q)
 
-    # If both pickup_area AND drop_area were requested, we can't push both
-    # into a single Firestore inequality — filter the smaller set in memory
-    if pickup_area and drop_area:
-        requests = [
-            r for r in requests
-            if r.get('pickup_area') == pickup_area
-            and r.get('drop_area') == drop_area
-        ]
+    # In-memory filtering for is_expired, pickup_area, drop_area
+    filtered = []
+    for r in requests:
+        if not include_expired and r.get('is_expired', False):
+            continue
+        if pickup_area and r.get('pickup_area') != pickup_area:
+            continue
+        if drop_area and r.get('drop_area') != drop_area:
+            continue
+        filtered.append(r)
 
-    # If only drop_area was used as the server filter and pickup_area was also
-    # supplied, the pickup filter was already pushed.  Vice-versa handled above.
+    # In-memory sorting by created_at descending (newest first)
+    def _get_sort_key(req):
+        val = req.get('created_at')
+        if not val:
+            return ""
+        if isinstance(val, str):
+            return val
+        try:
+            return val.isoformat()
+        except Exception:
+            return str(val)
 
-    return requests
+    filtered.sort(key=_get_sort_key, reverse=True)
+
+    return filtered[:limit]
 
 
 async def get_user_requests(user_uid: str, limit: int = None) -> List[dict]:
