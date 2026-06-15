@@ -37,7 +37,7 @@ from models import (
     ConnectivityStatsResponse, EnhancedDashboardResponse,
     CreateRatingModel, UpdateRatingModel, RatingResponse,
     UserRatingsResponse, CanRateResponse, RatingStatsResponse,
-    RatingsGivenResponse
+    RatingsGivenResponse, RewardEstimateResponse
 )
 from database import (
     create_request, get_all_requests, get_user_requests, get_accepted_requests,
@@ -1030,6 +1030,37 @@ async def get_device_analytics_endpoint(
 # ============================================
 # REQUEST ENDPOINTS (Enhanced for Phase 3)
 # ============================================
+
+@app.get("/request/estimate-reward", response_model=RewardEstimateResponse)
+async def estimate_reward_endpoint(
+        item_price: float = Query(..., gt=0, description="Total price of items to be delivered"),
+        pickup_area: str = Query(..., description="Pickup area name"),
+        drop_area: str = Query(..., description="Drop area name"),
+        priority: bool = Query(False, description="Whether the request is high priority"),
+        current_user: dict = Depends(get_current_user)
+):
+    """
+    Estimate the reward and get a detailed breakdown before placing the order.
+    """
+    from reward_calculator import get_reward_breakdown
+    from areas import validate_area
+
+    if not validate_area(pickup_area):
+        raise HTTPException(status_code=400, detail=f"Invalid pickup_area: {pickup_area}")
+    if not validate_area(drop_area):
+        raise HTTPException(status_code=400, detail=f"Invalid drop_area: {drop_area}")
+
+    try:
+        breakdown = get_reward_breakdown(
+            item_price=item_price,
+            priority=priority,
+            pickup_area=pickup_area,
+            drop_area=drop_area
+        )
+        return breakdown
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @app.post("/request/create", response_model=RequestResponse)
 async def create_request_endpoint(

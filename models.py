@@ -350,3 +350,16 @@ class GPSCoordinates(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
     accuracy: Optional[float] = Field(None, description="Accuracy in meters")
+
+
+class RewardEstimateResponse(BaseModel):
+    """Detailed breakdown of estimated reward calculation"""
+    distance_km: float
+    base_fare: float
+    item_component: float
+    subtotal: float
+    cap_applied: bool
+    reward_before_priority: float
+    priority_multiplier: float
+    final_reward: float
+    formula: str
