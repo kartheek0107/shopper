@@ -836,6 +836,10 @@ async def get_reachable_count_endpoint(
     - Staleness check (10 minute timeout)
     - Proper _nearby area handling
     """
+    counting_method = "unique_devices" if count_by_device else "users"
+    area_msg = f" in {area}" if area else ""
+    nearby_note = " (including nearby)" if include_nearby else " (excluding nearby)"
+
     try:
         # Rate limiting (Redis-backed)
         await rate_limit(f"count:{current_user['uid']}", max_requests=1, window_seconds=10)
@@ -847,20 +851,30 @@ async def get_reachable_count_endpoint(
             include_nearby=include_nearby
         )
 
-        counting_method = "unique_devices" if count_by_device else "users"
-        area_msg = f" in {area}" if area else ""
-        nearby_note = " (including nearby)" if include_nearby else " (excluding nearby)"
-
         return {
             "count": count,
             "counting_method": counting_method,
             "area": area or "all",
             "include_nearby": include_nearby,
             "message": f"{count} {counting_method} available{area_msg}{nearby_note}",
-            "cached": True  # Always true due to caching layer
+            "cached": True
         }
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        if e.status_code == 429:
+            # Try to return cached/stale count from Redis
+            from redis_cache import cache_get
+            cache_key = f"area_count:{area or 'all'}:{count_by_device}:{include_nearby}"
+            cached_count = await cache_get(cache_key)
+            if cached_count is not None:
+                return {
+                    "count": cached_count,
+                    "counting_method": counting_method,
+                    "area": area or "all",
+                    "include_nearby": include_nearby,
+                    "message": f"{cached_count} {counting_method} available{area_msg}{nearby_note} (serving cached value)",
+                    "cached": True
+                }
+        raise e
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -875,10 +889,13 @@ async def get_reachable_by_area_endpoint(
     Get count of reachable users or devices grouped by all areas
 
     FIXED:
-    - Rate limiting
+    - Rate limiting with cached fallback
     - Proper _nearby handling
     - Staleness check
     """
+    counting_method = "unique_devices" if count_by_device else "users"
+    note_msg = "Counts represent unique devices per area" if count_by_device else "Counts represent users per area"
+
     try:
         # Rate limiting (Redis-backed)
         await rate_limit(f"count_by_area:{current_user['uid']}", max_requests=1, window_seconds=10)
@@ -890,12 +907,24 @@ async def get_reachable_by_area_endpoint(
 
         return {
             "area_counts": area_counts,
-            "counting_method": "unique_devices" if count_by_device else "users",
+            "counting_method": counting_method,
             "include_nearby": include_nearby,
-            "note": "Counts represent unique devices per area" if count_by_device else "Counts represent users per area"
+            "note": note_msg
         }
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        if e.status_code == 429:
+            # Try to return cached/stale grouping from Redis
+            from redis_cache import cache_get
+            cache_key = f"area_counts_by_area:{count_by_device}:{include_nearby}"
+            cached_val = await cache_get(cache_key)
+            if cached_val is not None:
+                return {
+                    "area_counts": cached_val,
+                    "counting_method": counting_method,
+                    "include_nearby": include_nearby,
+                    "note": f"{note_msg} (serving cached value)"
+                }
+        raise e
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

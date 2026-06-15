@@ -218,6 +218,11 @@ async def get_reachable_users_by_area(
     include_nearby: bool = True
 ) -> Dict[str, int]:
     """Get count of reachable users grouped by GPS-detected area."""
+    cache_key = f"area_counts_by_area:{count_by_device}:{include_nearby}"
+    cached_val = await _get_cached_count(cache_key)
+    if cached_val is not None:
+        return cached_val
+
     q = build_query('users', filters=[('is_connected', '==', True)])
     all_users = await stream_query(q)
 
@@ -253,6 +258,7 @@ async def get_reachable_users_by_area(
             count = len(devices)
             if count > 0 or not area.endswith('_nearby'):
                 result[area] = count
+        await _set_cached_count(cache_key, result)
         return result
     else:
         area_counts = {area: 0 for area in PREDEFINED_AREAS}
@@ -281,6 +287,7 @@ async def get_reachable_users_by_area(
             area: count for area, count in area_counts.items()
             if count > 0 or not area.endswith('_nearby')
         }
+        await _set_cached_count(cache_key, result)
         return result
 
 
